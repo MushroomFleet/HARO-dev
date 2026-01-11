@@ -1,0 +1,110 @@
+# HARO Default Configuration
+# Copy to ~/.config/haro/config.yaml and customize
+
+haro:
+  # Device identification
+  device_id: "haro-default"
+  
+  # Wake word settings
+  wake:
+    phrase: "haro"
+    sensitivity: 0.5          # 0.0-1.0, lower = more sensitive
+    confirmation_sound: true  # Play chime on activation
+    confirmation_phrases:     # Random selection for variety
+      - "Yes?"
+      - "I'm here."
+      - "Listening."
+      - "How can I help?"
+  
+  # Audio settings
+  audio:
+    sample_rate: 16000        # 16kHz for speech
+    channels: 1               # Mono
+    chunk_size: 1024          # Samples per buffer
+    input_device: null        # null = system default
+    output_device: null       # null = system default
+    buffer_duration: 2.0      # Rolling buffer for wake detection (seconds)
+    
+  # Voice activity detection
+  vad:
+    threshold: 0.5            # Energy threshold multiplier
+    min_speech_duration: 0.5  # Minimum speech length (seconds)
+    max_speech_duration: 30   # Maximum recording length (seconds)
+    silence_duration: 1.5     # Silence duration to end recording (seconds)
+    noise_floor_adaptation: 0.05  # How quickly noise floor adapts
+    
+  # Speech-to-text (Whisper)
+  stt:
+    model: "tiny.en"          # tiny.en (~75MB), base.en (~140MB), small.en (~480MB)
+    model_path: "~/.cache/haro/models/"
+    language: "en"
+    compute_type: "int8"      # int8 for CPU efficiency, float16 for GPU
+    beam_size: 1              # 1 for speed, 5 for accuracy
+    vad_filter: true          # Use Silero VAD for better segmentation
+    
+  # Text-to-speech
+  tts:
+    engine: "piper"           # piper (default), supertonic (when available)
+    voice: "en_US-lessac-medium"  # Piper voice model
+    model_path: "~/.cache/haro/models/"
+    speed: 1.0                # Speech rate multiplier
+    volume: 0.8               # Output volume (0.0-1.0)
+    
+  # API settings
+  api:
+    provider: "anthropic"
+    model: "anthropic/claude-sonnet-4"
+    max_tokens: 1024          # Maximum response tokens
+    temperature: 0.7          # Response creativity (0.0-1.0)
+    timeout: 30               # API timeout in seconds
+    retry_attempts: 3         # Number of retries on failure
+    retry_delay: 1.0          # Seconds between retries
+    
+  # Context settings
+  context:
+    path: ".context/"         # Relative to working directory
+    history_turns: 10         # Conversation turns to include in context
+    session_timeout: 300      # Seconds of inactivity before new session
+    auto_save: true           # Automatically save sessions
+    max_context_tokens: 4000  # Maximum tokens for assembled context
+    
+  # Logging
+  logging:
+    level: "INFO"             # DEBUG, INFO, WARNING, ERROR
+    file: "~/.local/share/haro/logs/haro.log"
+    console: true             # Also log to console
+    max_file_size: 10485760   # 10MB
+    backup_count: 5           # Number of log files to keep
+
+  # Commands - local commands that don't need API
+  commands:
+    stop:
+      - "stop"
+      - "be quiet"
+      - "shut up"
+    repeat:
+      - "repeat that"
+      - "say that again"
+      - "what did you say"
+    new_session:
+      - "new conversation"
+      - "start over"
+      - "forget that"
+    sleep:
+      - "go to sleep"
+      - "sleep mode"
+    goodbye:
+      - "goodbye"
+      - "bye"
+      - "see you"
+    time:
+      - "what time is it"
+      - "what's the time"
+    volume_up:
+      - "louder"
+      - "volume up"
+      - "speak up"
+    volume_down:
+      - "quieter"
+      - "volume down"
+      - "speak softer"

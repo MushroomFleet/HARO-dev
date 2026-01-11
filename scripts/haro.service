@@ -1,0 +1,31 @@
+[Unit]
+Description=HARO Voice Assistant
+Documentation=https://github.com/user/haro
+After=sound.target network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/haro run --config %h/.config/haro/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.config/haro/env
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=haro
+
+[Install]
+WantedBy=default.target

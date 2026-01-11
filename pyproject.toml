@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "haro"
+version = "0.1.0"
+description = "A lightweight, always-listening voice AI assistant for dedicated hardware"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "HARO Project" }
+]
+keywords = [
+    "voice-assistant",
+    "ai",
+    "claude",
+    "whisper",
+    "tts",
+    "steam-deck"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Audio
+    "pyaudio>=0.2.13",
+    "numpy>=1.24.0",
+    "sounddevice>=0.4.6",
+    
+    # Speech - STT
+    "faster-whisper>=1.0.0",
+    
+    # Speech - TTS (piper as initial option, supertonic when available)
+    "piper-tts>=1.2.0",
+    
+    # API
+    "anthropic>=0.40.0",
+    "httpx>=0.25.0",
+    
+    # Configuration
+    "pyyaml>=6.0",
+    "watchdog>=3.0.0",
+    
+    # Utilities
+    "rich>=13.0.0",
+    "structlog>=23.1.0",
+    "click>=8.1.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "pyinstaller>=6.0.0",
+]
+
+[project.scripts]
+haro = "haro.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/haro-project/haro"
+Documentation = "https://github.com/haro-project/haro/docs"
+Repository = "https://github.com/haro-project/haro"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/haro"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
