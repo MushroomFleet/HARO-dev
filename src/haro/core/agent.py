@@ -58,6 +58,7 @@ class StateContext:
     speech_start_time: float = 0.0
     had_speech: bool = False  # Track if speech was detected during ACTIVE state
     last_activity_time: float = field(default_factory=time.time)
+    is_local_command: bool = False  # Track if response is from local command vs LLM
 
 
 @dataclass
@@ -137,6 +138,9 @@ class HaroAgent:
         self._active_timeout = config.vad.max_speech_duration
         self._silence_timeout = config.context.session_timeout
         self._processing_timeout = config.api.timeout
+
+        # Thinking delay threshold (seconds before playing "thinking" phrase)
+        self._thinking_delay_threshold = 2.5  # Default; can be configured
 
         # Wake word detection state
         self._passive_chunk_count = 0
@@ -396,6 +400,19 @@ class HaroAgent:
         # Process through VAD
         result = await self._vad.process(chunk, time.time())
 
+        # Log VAD state periodically (every ~0.5 seconds)
+        if int(time.time() - self.context.speech_start_time) % 1 == 0:
+            elapsed = time.time() - self.context.speech_start_time
+            if int(elapsed * 10) % 5 == 0:  # Every 0.5 seconds
+                self.logger.debug(
+                    "active_vad_state",
+                    elapsed=f"{elapsed:.1f}s",
+                    energy=result.energy,
+                    is_speech=result.is_speech,
+                    vad_state=result.state.value,
+                    had_speech=self.context.had_speech,
+                )
+
         # Track if we've seen any speech
         if result.is_speech:
             self.context.had_speech = True
@@ -421,14 +438,23 @@ class HaroAgent:
         # Check for timeout
         elapsed = time.time() - self.context.speech_start_time
         if elapsed > self._active_timeout:
-            self.logger.warning("speech_timeout", duration=elapsed)
+            self.logger.warning("speech_timeout", duration=elapsed, had_speech=self.context.had_speech)
             self.context.speech_start_time = 0
+            # Play error feedback so user knows we didn't hear them
+            if self._feedback:
+                await self._feedback.play_error()
             return AgentState.PASSIVE
 
         return None
 
     async def _handle_processing(self) -> Optional[AgentState]:
         """Handle PROCESSING state - API call in progress.
+
+        Pipeline:
+        1. Play transcription confirmation ("Got that, HARO.")
+        2. Check for local commands
+        3. Start API call with delay-triggered thinking phrase
+        4. Return response for speaking
 
         Returns:
             Next state or None to stay in current state.
@@ -437,16 +463,14 @@ class HaroAgent:
             self.logger.error("no_transcript_for_processing")
             return AgentState.PASSIVE
 
-        # Play immediate acknowledgment (non-blocking)
+        # Play simple transcription confirmation with single HARO signoff
         if self._feedback:
-            await self._feedback.play_acknowledgment(
-                query=self.context.transcript,
-                wait=True,  # Wait for short acknowledgment before continuing
-            )
+            await self._feedback.play_transcription_confirmation(wait=True)
 
         # Check for local commands first
         command = self._check_local_command(self.context.transcript)
         if command:
+            self.context.is_local_command = True  # Mark as local command
             response = await self._handle_local_command(command)
             if response:
                 self.context.response = response
@@ -454,14 +478,28 @@ class HaroAgent:
             else:
                 return AgentState.PASSIVE
 
-        # Make API call
+        # Make API call with delay-triggered thinking phrase
+        self.context.is_local_command = False  # Mark as LLM response
         if self._api_client:
             try:
                 self.stats.api_calls += 1
-                response = await asyncio.wait_for(
-                    self._call_api(self.context.transcript),
-                    timeout=self._processing_timeout,
-                )
+
+                # Create task for delayed thinking phrase
+                thinking_task = asyncio.create_task(self._play_delayed_thinking())
+
+                try:
+                    response = await asyncio.wait_for(
+                        self._call_api(self.context.transcript),
+                        timeout=self._processing_timeout,
+                    )
+                finally:
+                    # Cancel thinking task if still pending (API responded quickly)
+                    thinking_task.cancel()
+                    try:
+                        await thinking_task
+                    except asyncio.CancelledError:
+                        pass
+
                 self.context.response = response
 
                 if response:
@@ -486,11 +524,18 @@ class HaroAgent:
     async def _handle_speaking(self) -> Optional[AgentState]:
         """Handle SPEAKING state - TTS playback.
 
+        Uses double signoff (HARO HARO) for LLM responses,
+        single signoff (HARO) for local commands.
+
         Returns:
             Next state or None to stay in current state.
         """
         if not self.context.response:
             return AgentState.PASSIVE
+
+        # Determine signoff type based on response source
+        # Local commands get single HARO, LLM responses get double HARO HARO
+        use_double_signoff = not self.context.is_local_command
 
         # Add sign-off to response
         response_with_signoff = self.context.response
@@ -498,6 +543,7 @@ class HaroAgent:
             response_with_signoff = self._feedback.add_signoff(
                 self.context.response,
                 signoff=self.config.wake.phrase,  # Use wake phrase as sign-off
+                double=use_double_signoff,
             )
 
         # Store for repeat command (with sign-off)
@@ -527,9 +573,10 @@ class HaroAgent:
             except Exception as e:
                 self.logger.error("tts_error", error=str(e))
 
-        # Clear response
+        # Clear response and reset local command flag
         self.context.response = None
         self.context.transcript = None
+        self.context.is_local_command = False
 
         return AgentState.PASSIVE
 
@@ -700,9 +747,7 @@ class HaroAgent:
             self.logger.info("cache_hit", transcript=clean_transcript[:30])
             return cached
 
-        # Play thinking phrase while waiting for API (non-blocking)
-        if self._feedback:
-            await self._feedback.play_thinking(wait=False)
+        # Note: Thinking phrase is now handled by delay-triggered task in _handle_processing()
 
         try:
             # Build system prompt if we have a prompt builder
@@ -737,7 +782,10 @@ class HaroAgent:
     async def _play_with_interrupt(
         self, audio: np.ndarray, sample_rate: int
     ) -> None:
-        """Play audio with interrupt detection.
+        """Play audio with capture paused to avoid self-detection.
+
+        Pauses audio capture during playback to prevent detecting our own
+        speech as a wake word. Resumes capture after playback completes.
 
         Args:
             audio: Audio samples to play.
@@ -746,23 +794,33 @@ class HaroAgent:
         if not self._audio_playback:
             return
 
-        # Start playback
-        await self._audio_playback.play(audio, sample_rate=sample_rate, wait=False)
+        # Pause capture during playback to avoid detecting our own speech
+        if self._audio_capture:
+            self._audio_capture.pause()
 
-        # Monitor for interrupt while playing
-        while self._audio_playback.is_playing:
-            # Check for wake word
-            if self._audio_capture and self._wake_detector:
-                chunk = await self._audio_capture.read_chunk(timeout=0.05)
-                if chunk is not None:
-                    self._wake_detector.add_audio(chunk)
-                    result = await self._wake_detector.detect()
-                    if result.detected:
-                        self._interrupt_event.set()
-                        await self._audio_playback.stop()
-                        return
+        try:
+            # Play audio and wait for completion
+            await self._audio_playback.play(audio, sample_rate=sample_rate, wait=True)
+        finally:
+            # Always resume capture after playback
+            if self._audio_capture:
+                self._audio_capture.resume()
 
-            await asyncio.sleep(0.05)
+    async def _play_delayed_thinking(self) -> None:
+        """Play thinking phrase after delay threshold.
+
+        This method waits for the configured delay threshold, then plays
+        the thinking phrase if still in PROCESSING state. Should be run
+        as a task that can be cancelled if API responds quickly.
+        """
+        try:
+            await asyncio.sleep(self._thinking_delay_threshold)
+            # Only play if we're still in PROCESSING state
+            if self.state == AgentState.PROCESSING and self._feedback:
+                await self._feedback.play_thinking(wait=True)
+        except asyncio.CancelledError:
+            # API completed before threshold - don't play thinking phrase
+            pass
 
     def _check_local_command(self, transcript: str) -> Optional[str]:
         """Check if transcript is a local command.

@@ -18,6 +18,10 @@ from haro.core.config import (
 )
 from haro.core.events import EventBus, EventType, Event, StateChangeEvent
 from haro.core.agent import AgentState, StateContext, AgentStats, HaroAgent
+from haro.core.parallel_agent import ParallelAgent
+from haro.core.speech_worker import SpeechWorker, SpeechPriority, SpeechItem
+from haro.core.listen_worker import ListenWorker
+from haro.core.orchestrator import Orchestrator
 from haro.core.cache import CacheConfig, CacheEntry, ResponseCache
 from haro.core.lifecycle import (
     LifecyclePhase,
@@ -46,6 +50,12 @@ __all__ = [
     "StateContext",
     "AgentStats",
     "HaroAgent",
+    "ParallelAgent",
+    "SpeechWorker",
+    "SpeechPriority",
+    "SpeechItem",
+    "ListenWorker",
+    "Orchestrator",
     "CacheConfig",
     "CacheEntry",
     "ResponseCache",

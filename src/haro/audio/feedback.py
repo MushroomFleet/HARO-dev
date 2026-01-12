@@ -24,6 +24,8 @@ class FeedbackConfig:
 
     confirmation_sound: bool = True
     confirmation_phrases: List[str] = None
+    transcription_phrases: List[str] = None  # Simple confirmation after transcription
+    thinking_delay_threshold: float = 2.5  # Seconds before playing thinking phrase
     chime_frequency: float = 880.0  # A5
     chime_duration: float = 0.15
     chime_volume: float = 0.5
@@ -35,6 +37,13 @@ class FeedbackConfig:
                 "I'm here.",
                 "Listening.",
                 "How can I help?",
+            ]
+        if self.transcription_phrases is None:
+            self.transcription_phrases = [
+                "Copy that",
+                "Roger that",
+                "Acknowledged",
+                "Message received",
             ]
 
 
@@ -359,8 +368,43 @@ class AudioFeedback:
             # Fall back to beep
             await self.play_processing()
 
+    async def play_transcription_confirmation(self, wait: bool = True) -> None:
+        """Play a simple transcription confirmation with single HARO signoff.
+
+        Used immediately after successful speech transcription to confirm
+        the user's speech was captured. Simpler than play_acknowledgment() -
+        no context-aware phrase selection.
+
+        Args:
+            wait: If True, wait for playback to complete.
+        """
+        if not self._tts:
+            await self.play_processing()
+            return
+
+        # Select random simple confirmation phrase
+        phrase = random.choice(self.config.transcription_phrases)
+
+        # Add single HARO signoff
+        phrase_with_signoff = self.add_signoff(phrase, signoff="HARO", double=False)
+
+        try:
+            result = await self._tts.synthesize(phrase_with_signoff)
+            await self.playback.play(
+                result.audio,
+                sample_rate=result.sample_rate,
+                wait=wait,
+            )
+            self.logger.debug("transcription_confirmation_played", phrase=phrase)
+        except Exception as e:
+            self.logger.error("transcription_confirmation_failed", error=str(e))
+            await self.play_processing()
+
     async def play_thinking(self, wait: bool = True) -> None:
         """Play a 'thinking/processing' phrase while waiting for API.
+
+        Should be called with delay-triggered logic from the agent.
+        Appends single HARO signoff for consistency with canned responses.
 
         Args:
             wait: If True, wait for playback to complete.
@@ -370,15 +414,18 @@ class AudioFeedback:
             return
 
         phrases = [
-            "Getting the info now",
-            "Working on it",
+            "Still working on it",
             "Just a moment",
             "Almost there",
+            "Getting that for you",
         ]
         phrase = random.choice(phrases)
 
+        # Add single HARO signoff
+        phrase_with_signoff = self.add_signoff(phrase, signoff="HARO", double=False)
+
         try:
-            result = await self._tts.synthesize(phrase)
+            result = await self._tts.synthesize(phrase_with_signoff)
             await self.playback.play(
                 result.audio,
                 sample_rate=result.sample_rate,
@@ -388,12 +435,15 @@ class AudioFeedback:
         except Exception as e:
             self.logger.error("thinking_phrase_failed", error=str(e))
 
-    def add_signoff(self, response: str, signoff: str = "HARO") -> str:
+    def add_signoff(
+        self, response: str, signoff: str = "HARO", double: bool = False
+    ) -> str:
         """Append a sign-off word to a response.
 
         Args:
             response: The response text.
             signoff: The sign-off word to append.
+            double: If True, append double signoff (e.g., "HARO HARO").
 
         Returns:
             Response with sign-off appended.
@@ -401,14 +451,28 @@ class AudioFeedback:
         # Clean up response ending
         response = response.rstrip()
 
-        # Don't add signoff if response already ends with it
+        # Build signoff string
+        signoff_text = f"{signoff} {signoff}" if double else signoff
+
+        # Check for double signoff already present
+        double_pattern = f"{signoff.lower()} {signoff.lower()}"
+        if response.lower().endswith(double_pattern):
+            return response
+
+        # Don't add signoff if response already ends with it (single)
         if response.lower().endswith(signoff.lower()):
+            if double:
+                # Need to add one more for double signoff
+                if response[-1] in ".!?":
+                    return f"{response[:-1]} {signoff}."
+                else:
+                    return f"{response} {signoff}."
             return response
 
         # Add appropriate punctuation before signoff
         if response and response[-1] in ".!?":
-            return f"{response} {signoff}."
+            return f"{response} {signoff_text}."
         elif response:
-            return f"{response}, {signoff}."
+            return f"{response}, {signoff_text}."
         else:
             return response

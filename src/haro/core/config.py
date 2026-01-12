@@ -34,7 +34,7 @@ class VADConfig:
     threshold: float = 0.5
     min_speech_duration: float = 0.5
     max_speech_duration: float = 30.0
-    silence_duration: float = 1.5
+    silence_duration: float = 2.5
     noise_floor_adaptation: float = 0.05
 
 

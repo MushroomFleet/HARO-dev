@@ -158,6 +158,18 @@ class VoiceActivityDetector:
         # Check if energy indicates speech
         is_speech_energy = self._is_speech_energy(energy)
 
+        # Log periodically for debugging (every 50 chunks ~ 1 second)
+        if len(self._energy_history) % 50 == 0:
+            threshold = self._noise_floor * (1.0 + self.config.threshold * 10)
+            self.logger.debug(
+                "vad_status",
+                energy=energy,
+                threshold=threshold,
+                noise_floor=self._noise_floor,
+                is_speech=is_speech_energy,
+                state=self.state.value,
+            )
+
         # Update noise floor
         self._update_noise_floor(energy, is_speech_energy)
 

@@ -242,19 +242,28 @@ def init_context_cmd(
 
 
 @cli.command()
+@click.option(
+    "--parallel",
+    is_flag=True,
+    help="Use parallel worker architecture for faster response",
+)
 @click.pass_context
-def run(ctx: click.Context) -> None:
+def run(ctx: click.Context, parallel: bool) -> None:
     """Run the HARO voice assistant."""
     config: HaroConfig = ctx.obj["config"]
     logger = get_logger(__name__)
 
-    console.print("\n[bold blue]Starting HARO...[/bold blue]\n")
+    mode_str = "[yellow]parallel[/yellow]" if parallel else "sequential"
+    console.print(f"\n[bold blue]Starting HARO ({mode_str} mode)...[/bold blue]\n")
     console.print(f"Wake phrase: [cyan]\"{config.wake.phrase}\"[/cyan]")
     console.print(f"Sensitivity: [cyan]{config.wake.sensitivity}[/cyan]")
     console.print("Press Ctrl+C to stop\n")
 
     async def main() -> None:
-        from haro.core.agent import HaroAgent
+        if parallel:
+            from haro.core.parallel_agent import ParallelAgent as AgentClass
+        else:
+            from haro.core.agent import HaroAgent as AgentClass
         from haro.audio import AudioCapture, AudioPlayback, VoiceActivityDetector, AudioFeedback
         from haro.audio.wake import WakeWordDetector
         from haro.speech import WhisperSTT, PiperTTS
@@ -292,6 +301,9 @@ def run(ctx: click.Context) -> None:
         try:
             await tts.load_voice()
             console.print("  [green]TTS voice loaded[/green]")
+            # Wire up TTS to feedback for verbal confirmations
+            await feedback.set_tts(tts)
+            console.print("  [green]TTS connected to feedback system[/green]")
         except Exception as e:
             console.print(f"  [yellow]TTS not available: {e}[/yellow]")
             tts = None
@@ -320,7 +332,7 @@ def run(ctx: click.Context) -> None:
         console.print("  [green]Context manager ready[/green]")
 
         # Create agent
-        agent = HaroAgent(config)
+        agent = AgentClass(config)
         await agent.initialize(
             audio_capture=capture,
             audio_playback=playback,
