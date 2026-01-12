@@ -49,6 +49,15 @@ haro:
     model_path: "~/.cache/haro/models/"
     speed: 1.0                # Speech rate multiplier
     volume: 0.8               # Output volume (0.0-1.0)
+
+  # Feedback settings (canned responses and signoffs)
+  feedback:
+    transcription_phrases:    # Brief but clear confirmation after speech transcription
+      - "Copy that"
+      - "Roger that"
+      - "Acknowledged"
+      - "Message received"
+    thinking_delay_threshold: 2.5  # Seconds before playing "thinking" phrase
     
   # API settings
   api:
