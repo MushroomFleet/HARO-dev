@@ -101,6 +101,7 @@ class ParallelAgent:
         stt: WhisperSTT,
         tts: Optional[PiperTTS],
         api_client: Optional[ClaudeClient],
+        ollama_client=None,
         context_manager: Optional[ContextManager] = None,
         prompt_builder=None,
         **kwargs,  # Accept additional args for compatibility
@@ -114,7 +115,8 @@ class ParallelAgent:
             vad: Voice activity detector.
             stt: Speech-to-text engine.
             tts: Text-to-speech engine.
-            api_client: Claude API client.
+            api_client: Claude API client (cloud).
+            ollama_client: Ollama client for local LLM (faster first responses).
             context_manager: Optional context manager.
             prompt_builder: Optional prompt builder for system prompts.
         """
@@ -125,6 +127,7 @@ class ParallelAgent:
         self._stt = stt
         self._tts = tts
         self._api_client = api_client
+        self._ollama_client = ollama_client
         self._context_manager = context_manager
         self._prompt_builder = prompt_builder
 
@@ -159,6 +162,8 @@ class ParallelAgent:
             config=self.config,
             context_manager=context_manager,
             prompt_builder=prompt_builder,
+            ollama_client=ollama_client,  # Local LLM for fast first responses
+            event_bus=self.event_bus,  # For UI updates
         )
 
         self.logger.info(

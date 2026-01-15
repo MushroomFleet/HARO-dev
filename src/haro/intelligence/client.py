@@ -251,6 +251,14 @@ class ClaudeClient:
 
         messages.append({"role": "user", "content": user_input})
 
+        # LOG: Full prompt being sent to LLM
+        self.logger.info(
+            "llm_prompt_sent",
+            user_input=user_input,
+            history_messages=len(messages) - 1,
+            model=self.model,
+        )
+
         # Make request with retry
         start_time = time.time()
         response = await self._request_with_retry(
@@ -258,6 +266,15 @@ class ClaudeClient:
             messages=messages,
         )
         latency = time.time() - start_time
+
+        # LOG: Response preview (first 50 chars)
+        response_preview = response.text[:50] + "..." if len(response.text) > 50 else response.text
+        self.logger.info(
+            "llm_response_received",
+            response_preview=response_preview,
+            full_length=len(response.text),
+            latency=f"{latency:.2f}s",
+        )
 
         # Add to history
         self._add_message("user", user_input)

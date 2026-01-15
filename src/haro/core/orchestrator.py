@@ -6,6 +6,7 @@ to provide responsive, parallel operation.
 
 import asyncio
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Any
@@ -13,7 +14,17 @@ from typing import Optional, Callable, Any
 from haro.core.listen_worker import ListenWorker
 from haro.core.speech_worker import SpeechWorker, SpeechPriority
 from haro.core.config import HaroConfig
+from haro.core.events import (
+    EventBus,
+    Event,
+    EventType,
+    StateChangeEvent,
+    WakeWordEvent,
+    TranscriptionEvent,
+)
 from haro.intelligence.client import ClaudeClient
+from haro.intelligence.ollama_client import OllamaClient
+from haro.intelligence.router import IntelligenceRouter
 from haro.intelligence.prompts import PromptBuilder
 from haro.context.manager import ContextManager
 from haro.utils.logging import get_logger
@@ -21,39 +32,84 @@ from haro.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-# Status phrases for HARO persona
+def clean_text_for_tts(text: str) -> str:
+    """Clean text for TTS output by removing markdown formatting.
+
+    Removes characters that shouldn't be read aloud:
+    - # (markdown headers)
+    - * (bold/italic markers)
+    - _ (underscores used for emphasis)
+    - ` (code markers)
+    - > (blockquotes)
+
+    Args:
+        text: Raw text that may contain markdown.
+
+    Returns:
+        Cleaned text suitable for TTS.
+    """
+    # Remove markdown headers (# at start of lines)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+
+    # Remove bold/italic markers (* and _)
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'_+', '', text)
+
+    # Remove code markers
+    text = re.sub(r'`+', '', text)
+
+    # Remove blockquote markers
+    text = re.sub(r'^>\s*', '', text, flags=re.MULTILINE)
+
+    # Remove bullet points (- or * at start of lines)
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
+
+    # Remove numbered list markers
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+
+    # Collapse multiple spaces/newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {2,}', ' ', text)
+
+    return text.strip()
+
+
+# Status phrases for HARO persona (3rd person with single HARO signoff)
 STATUS_PHRASES = {
     "processing": [
-        "Processing.",
-        "Working on it.",
-        "Acknowledged.",
-        "Copy that.",
-        "On it.",
+        "HARO is processing.",
+        "HARO is working on it.",
+        "HARO acknowledges.",
+        "HARO copies that.",
+        "HARO is on it.",
+    ],
+    "transcribing": [
+        "HARO is transcribing.",
+        "HARO is processing speech.",
+        "HARO heard that.",
     ],
     "thinking": [
-        "Still working.",
-        "One moment.",
-        "Almost there.",
-        "Thinking.",
+        "HARO is still working.",
+        "HARO needs a moment.",
+        "HARO is almost there.",
+        "HARO is thinking.",
     ],
     "ready": [
-        "Ready.",
-        "Listening.",
-        "Standing by.",
+        "HARO is ready.",
+        "HARO is listening.",
+        "HARO is standing by.",
     ],
     "error": [
-        "Error encountered.",
-        "Unable to process.",
-        "Something went wrong.",
+        "HARO encountered an error.",
+        "HARO was unable to process.",
+        "HARO ran into a problem.",
     ],
     "timeout": [
-        "Request timed out.",
-        "No response received.",
+        "HARO's request timed out.",
+        "HARO received no response.",
     ],
     "wake": [
-        "Yes?",
-        "I'm here.",
-        "Listening.",
+        "Hello, HARO?",
     ],
 }
 
@@ -87,23 +143,45 @@ class Orchestrator:
         config: HaroConfig,
         context_manager: Optional[ContextManager] = None,
         prompt_builder: Optional[PromptBuilder] = None,
+        ollama_client: Optional[OllamaClient] = None,
+        event_bus: Optional[EventBus] = None,
     ) -> None:
         """Initialize orchestrator.
 
         Args:
             listen_worker: Listening worker instance.
             speech_worker: Speech output worker instance.
-            api_client: Claude API client.
+            api_client: Claude API client (cloud).
             config: HARO configuration.
             context_manager: Optional context manager.
             prompt_builder: Optional prompt builder for system prompts.
+            ollama_client: Optional Ollama client for local LLM.
+            event_bus: Optional event bus for publishing UI events.
         """
         self._listen = listen_worker
         self._speech = speech_worker
         self._api = api_client
+        self._ollama = ollama_client
         self._config = config
         self._context = context_manager
         self._prompt_builder = prompt_builder
+        self._event_bus = event_bus
+
+        # Track current state for UI
+        self._current_state = "PASSIVE"
+        self._last_llm_source = "cloud"  # Track which LLM was used for UI display
+
+        # Create router if we have any LLM clients
+        # Always prefer local LLM first - cloud is used on demand or escalation
+        if ollama_client or api_client:
+            self._router = IntelligenceRouter(
+                ollama_client=ollama_client,
+                claude_client=api_client,
+                prefer_local=True,  # Always try local LLM first
+                cloud_fallback=True,  # Fall back to cloud if local fails
+            )
+        else:
+            self._router = None
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -115,6 +193,59 @@ class Orchestrator:
 
         # Register callbacks with listen worker
         self._listen.on_wake(self._on_wake)
+        self._listen.on_interrupt(self._on_interrupt)
+
+    async def _publish_state(self, new_state: str) -> None:
+        """Publish state change event to UI.
+
+        Args:
+            new_state: The new state name.
+        """
+        if self._event_bus:
+            old_state = self._current_state
+            self._current_state = new_state
+            await self._event_bus.publish(
+                StateChangeEvent(
+                    previous_state=old_state,
+                    new_state=new_state,
+                )
+            )
+
+    async def _publish_wake(self, confidence: float = 1.0) -> None:
+        """Publish wake word event to UI."""
+        if self._event_bus:
+            await self._event_bus.publish(
+                WakeWordEvent(confidence=confidence, phrase=self._config.wake.phrase)
+            )
+
+    async def _publish_transcription(self, text: str, confidence: float = 1.0) -> None:
+        """Publish transcription event to UI."""
+        if self._event_bus:
+            await self._event_bus.publish(
+                TranscriptionEvent(text=text, confidence=confidence)
+            )
+
+    async def _publish_api_start(self) -> None:
+        """Publish API request start event."""
+        if self._event_bus:
+            await self._event_bus.publish(Event(type=EventType.API_REQUEST_START))
+
+    async def _publish_api_response(self, response: str, source: str = "cloud") -> None:
+        """Publish API response event with source info."""
+        if self._event_bus:
+            await self._event_bus.publish(
+                Event(type=EventType.API_RESPONSE_RECEIVED, data={
+                    "response": response,
+                    "source": source,  # "local" or "cloud"
+                })
+            )
+
+    async def _publish_api_error(self, error: str) -> None:
+        """Publish API error event."""
+        if self._event_bus:
+            await self._event_bus.publish(
+                Event(type=EventType.API_ERROR, data={"error": error})
+            )
 
     async def start(self) -> None:
         """Start the orchestrator."""
@@ -161,13 +292,52 @@ class Orchestrator:
 
     async def _on_wake(self) -> None:
         """Handle wake word detection."""
+        # Publish wake event for UI
+        await self._publish_wake()
+        await self._publish_state("ACTIVE")
+
         # Immediately speak wake confirmation
         phrase = random.choice(STATUS_PHRASES["wake"])
         await self._speech.speak_status(phrase)
         self.logger.debug("wake_acknowledged")
 
+    async def _on_interrupt(self) -> None:
+        """Handle interrupt command detected during TTS playback."""
+        self.logger.info("interrupt_command_received")
+
+        # Stop current speech and clear queue
+        await self._speech.interrupt()
+
+        # Publish state change for UI
+        await self._publish_state("PASSIVE")
+
+        # Resume listening in passive mode (this also resets wake cooldown)
+        self._listen.resume()
+
+    def _get_prompt_preview(self, transcript: str, max_words: int = 5) -> str:
+        """Get a short preview of the transcript for status TTS.
+
+        Args:
+            transcript: Full transcript text.
+            max_words: Maximum words to include in preview.
+
+        Returns:
+            Truncated transcript with ellipsis if needed.
+        """
+        words = transcript.split()
+        if len(words) <= max_words:
+            return transcript
+        return " ".join(words[:max_words]) + "..."
+
     async def _handle_transcript(self, transcript: str) -> None:
         """Handle user transcript.
+
+        Simplified flow:
+        1. Single acknowledgment with prompt preview
+        2. Send to LLM (local first, then cloud)
+        3. Clean and speak response with signoff
+
+        Supports ULTRATALK keyword for verbose responses.
 
         Args:
             transcript: Transcribed user speech.
@@ -177,11 +347,21 @@ class Orchestrator:
 
         self.logger.info("handling_transcript", text=transcript[:50])
 
+        # Check for ULTRATALK mode (verbose responses)
+        ultratalk_mode = "ultratalk" in transcript.lower()
+        if ultratalk_mode:
+            # Remove ULTRATALK from transcript before sending to LLM
+            transcript = re.sub(r'\bultratalk\b', '', transcript, flags=re.IGNORECASE).strip()
+            self.logger.info("ultratalk_mode_enabled")
+
+        # Publish transcription event for UI
+        await self._publish_transcription(transcript)
+
         # Pause listening during response
         self._listen.pause()
 
         try:
-            # Check for local command first
+            # Check for local command first (no LLM needed)
             command = self._check_local_command(transcript)
 
             if command:
@@ -189,6 +369,8 @@ class Orchestrator:
                 response = await self._handle_local_command(command)
 
                 if response:
+                    # Publish state for speaking
+                    await self._publish_state("SPEAKING")
                     # Speak with single signoff for local commands
                     await self._speech.speak(
                         response,
@@ -196,8 +378,15 @@ class Orchestrator:
                         signoff=self._config.wake.phrase,
                     )
             else:
-                # API call with parallel status updates
-                await self._handle_api_request(transcript)
+                # Publish state for processing
+                await self._publish_state("PROCESSING")
+
+                # Single acknowledgment: brief status with prompt preview
+                prompt_preview = self._get_prompt_preview(transcript)
+                await self._speech.speak_status(f"HARO heard: {prompt_preview}")
+
+                # Send to LLM (router will use local first, then cloud if needed)
+                await self._handle_api_request(transcript, ultratalk=ultratalk_mode)
 
             # Log turn to context
             if self._context:
@@ -209,8 +398,10 @@ class Orchestrator:
         finally:
             # Resume listening after speech completes
             # Wait for speech queue to empty
-            while self._speech.queue_size > 0 or self._speech.is_speaking:
-                await asyncio.sleep(0.1)
+            await self._speech.wait_for_speech()
+
+            # Return to passive state
+            await self._publish_state("PASSIVE")
 
             self._listen.resume()
 
@@ -218,55 +409,82 @@ class Orchestrator:
             self.stats.total_latency += latency
             self.logger.debug("transcript_handled", latency=f"{latency:.2f}s")
 
-    async def _handle_api_request(self, transcript: str) -> None:
-        """Handle API request with parallel status updates.
+    async def _handle_api_request(self, transcript: str, ultratalk: bool = False) -> None:
+        """Handle LLM request with parallel status updates.
+
+        Uses the intelligence router to decide between local (Ollama)
+        and cloud (Claude) LLM based on query complexity.
+        Local LLM is always tried first unless user explicitly asks for Claude.
 
         Args:
-            transcript: User transcript to send to API.
+            transcript: User transcript to send to LLM.
+            ultratalk: If True, skip summarization for verbose output.
         """
-        if not self._api:
-            await self._speech.speak_status("API not configured.", urgent=True)
+        # Check if we have any LLM configured (router or direct API)
+        if not self._router and not self._api:
+            await self._speech.speak_status("HARO has no LLM configured. HARO.", urgent=True)
             return
 
         self.stats.api_calls += 1
 
-        # Immediate acknowledgment
-        phrase = random.choice(STATUS_PHRASES["processing"])
-        await self._speech.speak_status(phrase)
+        # Publish API start event for UI
+        await self._publish_api_start()
 
-        # Start API call
-        api_task = asyncio.create_task(self._call_api(transcript))
+        # Start LLM call (routed or direct) - acknowledgment already done in _handle_transcript
+        use_router = self._router is not None
+        if use_router:
+            llm_task = asyncio.create_task(self._call_routed(transcript, ultratalk=ultratalk))
+        else:
+            llm_task = asyncio.create_task(self._call_api(transcript, ultratalk=ultratalk))
 
-        # Delayed thinking phrase if API is slow
+        # Delayed thinking phrase if LLM is slow (only show if taking > 3 seconds)
         thinking_task = asyncio.create_task(self._delayed_thinking())
 
         try:
-            response = await asyncio.wait_for(api_task, timeout=self._api_timeout)
+            result = await asyncio.wait_for(llm_task, timeout=self._api_timeout)
             thinking_task.cancel()
 
-            if response:
-                # Queue response with double signoff
-                await self._speech.speak_response(response, double_signoff=True)
+            if result:
+                # Handle routed response (text, source) or direct response (text only)
+                if use_router and isinstance(result, tuple):
+                    response_text, source = result
+                else:
+                    response_text = result
+                    source = "cloud"
+
+                # Clean text for TTS (remove markdown formatting)
+                response_text = clean_text_for_tts(response_text)
+
+                # Publish API response and state change for UI
+                await self._publish_api_response(response_text, source=source)
+                await self._publish_state("SPEAKING")
+
+                # Queue response with double signoff (HARO HARO) for LLM responses
+                await self._speech.speak_response(response_text, double_signoff=True)
             else:
-                await self._speech.speak_status("No response received.", urgent=True)
+                await self._publish_api_error("No response received")
+                await self._speech.speak_status("HARO received no response. HARO.", urgent=True)
 
         except asyncio.TimeoutError:
             thinking_task.cancel()
+            await self._publish_api_error("Timeout")
             phrase = random.choice(STATUS_PHRASES["timeout"])
             await self._speech.speak_status(phrase, urgent=True)
-            self.logger.warning("api_timeout")
+            self.logger.warning("llm_timeout")
 
         except Exception as e:
             thinking_task.cancel()
+            await self._publish_api_error(str(e))
             phrase = random.choice(STATUS_PHRASES["error"])
             await self._speech.speak_status(phrase, urgent=True)
-            self.logger.error("api_error", error=str(e))
+            self.logger.error("llm_error", error=str(e))
 
-    async def _call_api(self, transcript: str) -> Optional[str]:
+    async def _call_api(self, transcript: str, ultratalk: bool = False) -> Optional[str]:
         """Call Claude API.
 
         Args:
             transcript: User transcript.
+            ultratalk: If True, request verbose responses.
 
         Returns:
             Response text or None.
@@ -278,10 +496,31 @@ class Orchestrator:
                 prompt = self._prompt_builder.build(user_input=transcript)
                 system_prompt = prompt.content
 
+            # Add conciseness instruction unless ULTRATALK mode
+            if not ultratalk:
+                system_prompt = self._add_conciseness_instruction(system_prompt)
+            else:
+                # For ULTRATALK, add verbose instruction
+                system_prompt = self._add_verbose_instruction(system_prompt)
+
+            # LOG: Sending prompt to LLM
+            self.logger.info(
+                "llm_prompt_sending",
+                transcript=transcript,
+                ultratalk=ultratalk,
+            )
+
             response = await self._api.complete(
                 user_input=transcript,
                 system_prompt=system_prompt,
                 include_history=True,
+            )
+
+            # LOG: Response preview
+            response_preview = response.text[:50] + "..." if len(response.text) > 50 else response.text
+            self.logger.info(
+                "llm_response_preview",
+                preview=response_preview,
             )
 
             return response.text
@@ -289,6 +528,102 @@ class Orchestrator:
         except Exception as e:
             self.logger.error("api_call_failed", error=str(e))
             return None
+
+    async def _call_routed(self, transcript: str, ultratalk: bool = False) -> Optional[tuple[str, str]]:
+        """Call LLM through the intelligence router.
+
+        Routes between local (Ollama) and cloud (Claude) based on
+        query complexity and explicit user triggers.
+
+        Args:
+            transcript: User transcript.
+            ultratalk: If True, request verbose responses.
+
+        Returns:
+            Tuple of (response_text, source) or None.
+            Source is "local" or "cloud".
+        """
+        try:
+            # Build system prompt using prompt builder
+            system_prompt = None
+            if self._prompt_builder:
+                prompt = self._prompt_builder.build(user_input=transcript)
+                system_prompt = prompt.content
+
+            # Add conciseness instruction unless ULTRATALK mode
+            if not ultratalk:
+                system_prompt = self._add_conciseness_instruction(system_prompt)
+            else:
+                # For ULTRATALK, add verbose instruction
+                system_prompt = self._add_verbose_instruction(system_prompt)
+
+            # LOG: Sending prompt through router
+            self.logger.info(
+                "llm_routing",
+                transcript=transcript,
+                ultratalk=ultratalk,
+            )
+
+            response = await self._router.route(
+                prompt=transcript,
+                system_prompt=system_prompt,
+            )
+
+            # LOG: Response received with source
+            response_preview = response.text[:50] + "..." if len(response.text) > 50 else response.text
+            self.logger.info(
+                "llm_routed_response",
+                source=response.source,
+                preview=response_preview,
+                latency=f"{response.latency:.2f}s",
+            )
+
+            # Track last source for UI display
+            self._last_llm_source = response.source
+
+            return (response.text, response.source)
+
+        except Exception as e:
+            self.logger.error("routed_call_failed", error=str(e))
+            return None
+
+    def _add_conciseness_instruction(self, system_prompt: Optional[str]) -> str:
+        """Add instruction to keep responses concise for TTS.
+
+        Args:
+            system_prompt: Existing system prompt.
+
+        Returns:
+            System prompt with conciseness instruction added.
+        """
+        conciseness_instruction = """
+IMPORTANT: Keep your response VERY SHORT - 1-2 sentences maximum.
+This is a voice assistant - responses are spoken aloud via TTS.
+Be direct and concise. Do not use bullet points, lists, or formatting.
+Start with the most important information. Skip pleasantries.
+"""
+        if system_prompt:
+            return system_prompt + "\n\n" + conciseness_instruction
+        return conciseness_instruction
+
+    def _add_verbose_instruction(self, system_prompt: Optional[str]) -> str:
+        """Add instruction for verbose ULTRATALK mode responses.
+
+        Args:
+            system_prompt: Existing system prompt.
+
+        Returns:
+            System prompt with verbose instruction added.
+        """
+        verbose_instruction = """
+ULTRATALK MODE ACTIVATED: The user has requested a detailed, verbose response.
+Provide comprehensive information with full explanations.
+You may use longer responses, but still speak naturally for TTS output.
+Avoid bullet points and markdown - use flowing sentences instead.
+"""
+        if system_prompt:
+            return system_prompt + "\n\n" + verbose_instruction
+        return verbose_instruction
 
     async def _delayed_thinking(self) -> None:
         """Play thinking phrase after delay."""
@@ -359,43 +694,43 @@ class Orchestrator:
 
         elif command == "repeat":
             # Would need to track last response
-            return "I don't have anything to repeat."
+            return "HARO has nothing to repeat."
 
         elif command == "louder":
-            return "Volume increased."
+            return "HARO increased volume."
 
         elif command == "quieter":
-            return "Volume decreased."
+            return "HARO decreased volume."
 
         elif command == "mute":
-            return "Muted."
+            return "HARO is muted."
 
         elif command == "unmute":
-            return "Unmuted."
+            return "HARO is unmuted."
 
         elif command == "pause":
-            return "I'm listening."
+            return "HARO is listening."
 
         elif command == "sleep":
-            return "Going to sleep. Say the wake word to wake me up."
+            return "HARO is going to sleep. Say the wake word to wake HARO up."
 
         elif command == "goodbye":
-            return "Goodbye!"
+            return "HARO says goodbye!"
 
         elif command == "new_conversation":
             if self._api:
                 self._api.clear_history()
-            return "Starting a new conversation."
+            return "HARO is starting a new conversation."
 
         elif command == "time":
             from datetime import datetime
             now = datetime.now()
-            return f"It's {now.strftime('%I:%M %p')}."
+            return f"HARO says the time is {now.strftime('%I:%M %p')}."
 
         elif command == "date":
             from datetime import datetime
             now = datetime.now()
-            return f"Today is {now.strftime('%A, %B %d, %Y')}."
+            return f"HARO says today is {now.strftime('%A, %B %d, %Y')}."
 
         elif command == "status":
             return self._get_status_response()
@@ -409,15 +744,15 @@ class Orchestrator:
         """Get status information."""
         return (
             f"HARO is operational. "
-            f"Processed {self.stats.requests} requests. "
-            f"API calls: {self.stats.api_calls}. "
-            f"Errors: {self.stats.errors}."
+            f"HARO has processed {self.stats.requests} requests. "
+            f"HARO has made {self.stats.api_calls} API calls. "
+            f"HARO has encountered {self.stats.errors} errors."
         )
 
     def _get_help_response(self) -> str:
         """Get help information."""
         return (
-            "Available commands: "
+            "HARO can respond to: "
             "stop, repeat, louder, quieter, mute, unmute, "
-            "time, date, status, new conversation, sleep, goodbye."
+            "time, date, status, new conversation, sleep, and goodbye."
         )

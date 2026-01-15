@@ -34,7 +34,7 @@ class VADConfig:
     threshold: float = 0.5
     min_speech_duration: float = 0.5
     max_speech_duration: float = 30.0
-    silence_duration: float = 2.5
+    silence_duration: float = 3.0  # Stop recording after 3s of silence
     noise_floor_adaptation: float = 0.05
 
 
@@ -42,7 +42,7 @@ class VADConfig:
 class STTConfig:
     """Speech-to-Text configuration."""
 
-    model: str = "tiny.en"
+    model: str = "base.en"
     model_path: str = "~/.cache/haro/models/"
     language: str = "en"
     compute_type: str = "int8"
@@ -66,13 +66,33 @@ class APIConfig:
     """Claude API configuration."""
 
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    # The :online suffix enables OpenRouter web search for up-to-date information
+    model: str = "anthropic/claude-sonnet-4.5:online"
     max_tokens: int = 1024
     temperature: float = 0.7
     timeout: int = 30
     retry_attempts: int = 3
     retry_delay: float = 1.0
     base_url: Optional[str] = None  # For OpenRouter or custom endpoints
+
+
+@dataclass
+class OllamaConfig:
+    """Ollama local LLM configuration."""
+
+    enabled: bool = True
+    model: str = "ministral:3b"
+    base_url: str = "http://localhost:11434"
+    timeout: int = 30
+    temperature: float = 0.7
+    max_tokens: int = 512
+    # Phrases that trigger cloud LLM (with web search via :online suffix)
+    cloud_keywords: list[str] = field(default_factory=lambda: [
+        "ask claude", "use claude",
+        "search the web", "search online", "look up online",
+        "current news", "latest news", "what's happening",
+        "complex", "detailed", "explain in depth"
+    ])
 
 
 @dataclass
@@ -105,7 +125,7 @@ class WakeConfig:
     sensitivity: float = 0.5
     confirmation_sound: bool = True
     confirmation_phrases: list[str] = field(
-        default_factory=lambda: ["Yes?", "I'm here.", "Listening.", "How can I help?"]
+        default_factory=lambda: ["Hello, HARO?"]
     )
 
 
@@ -143,6 +163,7 @@ class HaroConfig:
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     api: APIConfig = field(default_factory=APIConfig)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)

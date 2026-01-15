@@ -33,17 +33,14 @@ class FeedbackConfig:
     def __post_init__(self):
         if self.confirmation_phrases is None:
             self.confirmation_phrases = [
-                "Yes?",
-                "I'm here.",
-                "Listening.",
-                "How can I help?",
+                "Hello, HARO?",
             ]
         if self.transcription_phrases is None:
             self.transcription_phrases = [
-                "Copy that",
-                "Roger that",
-                "Acknowledged",
-                "Message received",
+                "HARO copies that",
+                "HARO received that",
+                "HARO acknowledges",
+                "HARO is processing",
             ]
 
 
@@ -326,16 +323,16 @@ class AudioFeedback:
         query_lower = query.lower()
 
         context_phrases = {
-            "weather": ["Checking the weather", "Let me check the weather"],
-            "time": ["Getting the time", "Let me check"],
-            "date": ["Checking the date", "Let me see"],
-            "remind": ["I'll set that reminder", "Setting a reminder"],
-            "search": ["Searching for that", "Let me search"],
-            "calculate": ["Calculating", "Let me work that out"],
-            "tell me": ["Let me tell you", "I can help with that"],
-            "what is": ["Let me look that up", "I'll find out"],
-            "who is": ["Let me check", "Looking that up"],
-            "how": ["Let me explain", "I'll help with that"],
+            "weather": ["HARO is checking the weather", "HARO will check the weather"],
+            "time": ["HARO is getting the time", "HARO will check"],
+            "date": ["HARO is checking the date", "HARO will see"],
+            "remind": ["HARO will set that reminder", "HARO is setting a reminder"],
+            "search": ["HARO is searching for that", "HARO will search"],
+            "calculate": ["HARO is calculating", "HARO will work that out"],
+            "tell me": ["HARO will tell you", "HARO can help with that"],
+            "what is": ["HARO will look that up", "HARO will find out"],
+            "who is": ["HARO will check", "HARO is looking that up"],
+            "how": ["HARO will explain", "HARO will help with that"],
         }
 
         # Find matching context phrase
@@ -348,10 +345,10 @@ class AudioFeedback:
         # Default phrases if no context match
         if not phrase:
             default_phrases = [
-                "I'll look that up",
-                "Let me check",
-                "One moment",
-                "Looking into that",
+                "HARO will look that up",
+                "HARO will check",
+                "HARO needs a moment",
+                "HARO is looking into that",
             ]
             phrase = random.choice(default_phrases)
 
@@ -414,10 +411,10 @@ class AudioFeedback:
             return
 
         phrases = [
-            "Still working on it",
-            "Just a moment",
-            "Almost there",
-            "Getting that for you",
+            "HARO is still working on it",
+            "HARO needs just a moment",
+            "HARO is almost there",
+            "HARO is getting that for you",
         ]
         phrase = random.choice(phrases)
 

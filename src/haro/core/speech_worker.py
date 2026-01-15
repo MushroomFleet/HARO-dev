@@ -19,11 +19,17 @@ logger = get_logger(__name__)
 
 
 class SpeechPriority(IntEnum):
-    """Priority levels for speech output."""
+    """Priority levels for speech output.
 
-    URGENT = 0  # Immediate status (errors, stop)
-    STATUS = 1  # Normal status (processing, thinking)
-    RESPONSE = 2  # Full API responses
+    Note: Lower numbers = higher priority. However, to ensure proper
+    sequencing of conversational flow, STATUS and RESPONSE now share
+    the same priority (2) so they play in FIFO order. Only URGENT (0)
+    interrupts the queue.
+    """
+
+    URGENT = 0  # Immediate status (errors, interrupts) - jumps queue
+    STATUS = 2  # Normal status (processing, thinking) - FIFO with responses
+    RESPONSE = 2  # Full API responses - FIFO with status
 
 
 @dataclass(order=True)
@@ -67,6 +73,7 @@ class SpeechWorker:
         self._sequence = 0  # Monotonic counter for FIFO ordering
         self._current_item: Optional[SpeechItem] = None
         self._task: Optional[asyncio.Task] = None
+        self._interrupted = False  # Flag to signal interrupt occurred
 
         self.logger = logger.bind(component="SpeechWorker")
 
@@ -163,17 +170,28 @@ class SpeechWorker:
         )
 
     async def interrupt(self) -> None:
-        """Interrupt current speech and clear queue."""
-        # Stop current playback
-        if self._playback:
-            await self._playback.stop()
+        """Interrupt current speech and clear queue.
 
-        # Clear queue
+        This stops the current playback immediately without stopping
+        the playback system, allowing new speech to be queued.
+        """
+        # Set interrupted flag so wait_for_speech returns immediately
+        self._interrupted = True
+
+        # Interrupt current playback (doesn't stop the playback loop)
+        if self._playback:
+            self._playback.interrupt()
+            self._playback.clear_queue()
+
+        # Clear speech queue
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+        # Clear current item so we don't wait for it
+        self._current_item = None
 
         self.logger.info("speech_interrupted")
 
@@ -186,6 +204,31 @@ class SpeechWorker:
     def queue_size(self) -> int:
         """Get current queue size."""
         return self._queue.qsize()
+
+    async def wait_for_speech(self, timeout: Optional[float] = None) -> bool:
+        """Wait for current speech and queue to complete.
+
+        Args:
+            timeout: Optional timeout in seconds.
+
+        Returns:
+            True if speech completed, False if timed out or interrupted.
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        while self.is_speaking or self.queue_size > 0:
+            # Check if we were interrupted - return immediately
+            if self._interrupted:
+                self._interrupted = False  # Reset flag
+                return False
+
+            if timeout:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= timeout:
+                    return False
+            await asyncio.sleep(0.1)
+
+        return True
 
     async def _run(self) -> None:
         """Main worker loop."""

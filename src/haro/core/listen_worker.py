@@ -1,12 +1,13 @@
 """Continuous listening worker.
 
 Handles audio capture, wake word detection, VAD, and transcription
-as an independent async worker.
+as an independent async worker. Supports interrupt detection during
+TTS playback to catch "stop" commands.
 """
 
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, List
 
 import numpy as np
 
@@ -23,7 +24,7 @@ logger = get_logger(__name__)
 class ListenEvent:
     """Event from listen worker."""
 
-    type: str  # "wake", "transcript", "error"
+    type: str  # "wake", "transcript", "error", "interrupt"
     data: Any = None
 
 
@@ -34,7 +35,11 @@ class ListenWorker:
     - Wake word ("HARO") in passive mode
     - Speech via VAD in active mode
     - Transcription via Whisper when speech ends
+    - Interrupt commands ("stop") during TTS playback
     """
+
+    # Commands that can interrupt TTS playback
+    INTERRUPT_COMMANDS = ["stop", "shut up", "be quiet", "cancel", "haro stop"]
 
     def __init__(
         self,
@@ -63,6 +68,7 @@ class ListenWorker:
         self._passive = True  # True = listening for wake, False = recording speech
         self._had_speech = False
         self._paused = False
+        self._interrupt_mode = False  # True = listening for interrupt commands during TTS
 
         # Output queue for transcripts
         self._transcript_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -70,10 +76,16 @@ class ListenWorker:
         # Event callbacks
         self._on_wake_callback: Optional[Callable[[], Any]] = None
         self._on_transcript_callback: Optional[Callable[[str], Any]] = None
+        self._on_interrupt_callback: Optional[Callable[[], Any]] = None
 
         # Chunk counter for periodic wake detection
         self._chunk_count = 0
         self._wake_check_interval = 8  # Check every 8 chunks (~0.5s)
+
+        # Buffer for interrupt detection during TTS
+        self._interrupt_buffer: List[np.ndarray] = []
+        self._interrupt_check_interval = 16  # Check every 16 chunks (~1s)
+        self._interrupt_chunk_count = 0
 
         self._task: Optional[asyncio.Task] = None
         self.logger = logger.bind(component="ListenWorker")
@@ -103,17 +115,39 @@ class ListenWorker:
         self.logger.info("listen_worker_stopped")
 
     def pause(self) -> None:
-        """Pause listening (during TTS playback)."""
+        """Pause full listening but stay in interrupt detection mode.
+
+        During TTS playback, we don't process normal wake words or
+        transcriptions, but we still listen for interrupt commands
+        like "stop" or "shut up".
+        """
         self._paused = True
-        self.logger.debug("listen_paused")
+        self._interrupt_mode = True
+        self._interrupt_buffer = []
+        self._interrupt_chunk_count = 0
+        self.logger.debug("listen_paused_interrupt_mode")
+
+    def pause_full(self) -> None:
+        """Fully pause listening (no interrupt detection)."""
+        self._paused = True
+        self._interrupt_mode = False
+        self.logger.debug("listen_paused_full")
 
     def resume(self) -> None:
         """Resume listening."""
         self._paused = False
+        self._interrupt_mode = False
         # Reset to passive mode after pause
         self._passive = True
         self._had_speech = False
         self._vad.reset()
+        self._interrupt_buffer = []
+        # Reset chunk counter for immediate wake detection
+        self._chunk_count = 0
+        # Reset wake detector cooldown so wake word works immediately
+        if self._wake:
+            self._wake.reset_cooldown()
+            self._wake.clear_buffer()
         self.logger.debug("listen_resumed")
 
     def set_active(self) -> None:
@@ -136,6 +170,10 @@ class ListenWorker:
     def on_transcript(self, callback: Callable[[str], Any]) -> None:
         """Set callback for transcription complete."""
         self._on_transcript_callback = callback
+
+    def on_interrupt(self, callback: Callable[[], Any]) -> None:
+        """Set callback for interrupt command detection."""
+        self._on_interrupt_callback = callback
 
     async def get_transcript(self, timeout: Optional[float] = None) -> Optional[str]:
         """Get next transcript from queue.
@@ -176,7 +214,12 @@ class ListenWorker:
                 if chunk is None:
                     continue
 
-                # Skip processing if paused (TTS playing)
+                # Handle interrupt mode (during TTS playback)
+                if self._paused and self._interrupt_mode:
+                    await self._handle_interrupt_detection(chunk)
+                    continue
+
+                # Skip all processing if fully paused
                 if self._paused:
                     continue
 
@@ -290,3 +333,96 @@ class ListenWorker:
             self.logger.error("transcription_error", error=str(e))
 
         return None
+
+    async def _handle_interrupt_detection(self, chunk: np.ndarray) -> None:
+        """Handle interrupt detection during TTS playback.
+
+        Listens for short interrupt commands like "stop" without
+        triggering full transcription. Uses VAD to detect speech
+        bursts and transcribes them quickly.
+
+        Args:
+            chunk: Audio chunk from microphone.
+        """
+        import time
+
+        # Accumulate audio in interrupt buffer
+        self._interrupt_buffer.append(chunk)
+        self._interrupt_chunk_count += 1
+
+        # Check for speech energy (simple VAD check)
+        chunk_energy = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
+
+        # Only process if we have enough audio and detected some energy
+        if self._interrupt_chunk_count >= self._interrupt_check_interval:
+            # Concatenate buffer
+            if self._interrupt_buffer:
+                audio = np.concatenate(self._interrupt_buffer)
+
+                # Quick energy check - only transcribe if there's significant audio
+                audio_energy = np.sqrt(np.mean(audio.astype(np.float32) ** 2))
+
+                if audio_energy > 0.01:  # Above noise floor
+                    # Quick transcription check for interrupt commands
+                    try:
+                        result = await self._stt.transcribe(
+                            audio,
+                            sample_rate=self._sample_rate,
+                        )
+
+                        if result.text:
+                            text = result.text.lower().strip()
+                            self.logger.debug(
+                                "interrupt_check",
+                                text=text[:30],
+                                energy=f"{audio_energy:.4f}",
+                            )
+
+                            # Check if it matches any interrupt command
+                            if self._is_interrupt_command(text):
+                                self.logger.info(
+                                    "interrupt_detected",
+                                    command=text,
+                                )
+
+                                # Fire interrupt callback
+                                if self._on_interrupt_callback:
+                                    try:
+                                        if asyncio.iscoroutinefunction(self._on_interrupt_callback):
+                                            await self._on_interrupt_callback()
+                                        else:
+                                            self._on_interrupt_callback()
+                                    except Exception as e:
+                                        self.logger.error("interrupt_callback_error", error=str(e))
+
+                                # Exit interrupt mode after successful detection
+                                self._interrupt_mode = False
+
+                    except Exception as e:
+                        self.logger.debug("interrupt_transcription_error", error=str(e))
+
+            # Reset buffer (keep last few chunks for continuity)
+            self._interrupt_buffer = self._interrupt_buffer[-4:] if len(self._interrupt_buffer) > 4 else []
+            self._interrupt_chunk_count = len(self._interrupt_buffer)
+
+    def _is_interrupt_command(self, text: str) -> bool:
+        """Check if text matches an interrupt command.
+
+        Args:
+            text: Transcribed text to check.
+
+        Returns:
+            True if text is an interrupt command.
+        """
+        text = text.lower().strip().rstrip(".,!?")
+
+        # Direct match
+        if text in self.INTERRUPT_COMMANDS:
+            return True
+
+        # Partial match (text starts with interrupt command)
+        for cmd in self.INTERRUPT_COMMANDS:
+            if text.startswith(cmd):
+                return True
+
+        return False
