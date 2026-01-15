@@ -16,3 +16,13 @@ __all__ = [
     "EventBus",
     "EventType",
 ]
+
+# Lazy import for UI module to avoid circular imports
+def __getattr__(name: str):
+    if name == "ConsoleDisplay":
+        from haro.ui import ConsoleDisplay
+        return ConsoleDisplay
+    if name == "DisplayConfig":
+        from haro.ui import DisplayConfig
+        return DisplayConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

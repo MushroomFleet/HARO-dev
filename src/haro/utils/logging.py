@@ -20,6 +20,7 @@ def setup_logging(
     console: bool = True,
     max_file_size: int = 10 * 1024 * 1024,  # 10MB
     backup_count: int = 5,
+    ui_mode: bool = False,
 ) -> None:
     """Configure structlog for HARO.
 
@@ -29,7 +30,14 @@ def setup_logging(
         console: Whether to output to console.
         max_file_size: Maximum size of log file before rotation.
         backup_count: Number of backup log files to keep.
+        ui_mode: If True, suppress console output to avoid cluttering the rich UI.
     """
+    # When UI mode is enabled, disable console logging to keep the display clean
+    if ui_mode:
+        console = False
+        # If no log file specified in UI mode, log to a default location
+        if not log_file:
+            log_file = ".context/logs/haro.log"
     # Convert level string to logging level
     log_level = getattr(logging, level.upper(), logging.INFO)
 

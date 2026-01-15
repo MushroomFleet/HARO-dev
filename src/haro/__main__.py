@@ -14,6 +14,7 @@ from rich.table import Table
 
 from haro import __version__
 from haro.core.config import load_config, HaroConfig
+from haro.core.events import EventBus, get_event_bus
 from haro.utils.logging import setup_logging, get_logger
 
 console = Console()
@@ -243,24 +244,59 @@ def init_context_cmd(
 
 @cli.command()
 @click.option(
-    "--parallel",
+    "--sequential",
     is_flag=True,
-    help="Use parallel worker architecture for faster response",
+    help="Use sequential mode instead of parallel workers (for debugging)",
+)
+@click.option(
+    "--ui",
+    is_flag=True,
+    help="Enable rich console UI with real-time status display",
+)
+@click.option(
+    "--ui-compact",
+    is_flag=True,
+    help="Use compact single-line UI mode",
 )
 @click.pass_context
-def run(ctx: click.Context, parallel: bool) -> None:
-    """Run the HARO voice assistant."""
+def run(ctx: click.Context, sequential: bool, ui: bool, ui_compact: bool) -> None:
+    """Run the HARO voice assistant.
+
+    By default, runs in parallel mode for faster response times.
+    Use --sequential for debugging with the single-threaded agent.
+    """
     config: HaroConfig = ctx.obj["config"]
+
+    # Reconfigure logging for UI mode (suppress console logs to keep display clean)
+    if ui:
+        setup_logging(
+            level=config.logging.level,
+            log_file=config.logging.file,
+            ui_mode=True,  # Suppress console logs, log to file instead
+        )
+
     logger = get_logger(__name__)
 
-    mode_str = "[yellow]parallel[/yellow]" if parallel else "sequential"
-    console.print(f"\n[bold blue]Starting HARO ({mode_str} mode)...[/bold blue]\n")
-    console.print(f"Wake phrase: [cyan]\"{config.wake.phrase}\"[/cyan]")
-    console.print(f"Sensitivity: [cyan]{config.wake.sensitivity}[/cyan]")
-    console.print("Press Ctrl+C to stop\n")
+    # Parallel is now the default, sequential is opt-in for debugging
+    use_parallel = not sequential
+
+    # Helper to conditionally print (suppress in UI mode for clean display)
+    def status_print(*args, **kwargs):
+        if not ui:
+            console.print(*args, **kwargs)
+
+    mode_str = "[yellow]parallel[/yellow]" if use_parallel else "[dim]sequential[/dim]"
+    ui_str = " with [green]rich UI[/green]" if ui else ""
+    status_print(f"\n[bold blue]Starting HARO ({mode_str} mode){ui_str}...[/bold blue]\n")
+    status_print(f"Wake phrase: [cyan]\"{config.wake.phrase}\"[/cyan]")
+    status_print(f"Sensitivity: [cyan]{config.wake.sensitivity}[/cyan]")
+    status_print("Press Ctrl+C to stop\n")
 
     async def main() -> None:
-        if parallel:
+        # Use nonlocal status_print for consistent output suppression in UI mode
+        nonlocal status_print
+
+        if use_parallel:
             from haro.core.parallel_agent import ParallelAgent as AgentClass
         else:
             from haro.core.agent import HaroAgent as AgentClass
@@ -275,8 +311,19 @@ def run(ctx: click.Context, parallel: bool) -> None:
             device_id=config.device_id,
         )
 
+        # Create shared event bus
+        event_bus = get_event_bus()
+
+        # Initialize console display if enabled
+        console_display = None
+        if ui:
+            from haro.ui import ConsoleDisplay, DisplayConfig
+            display_config = DisplayConfig(compact_mode=ui_compact)
+            console_display = ConsoleDisplay(event_bus, display_config, console)
+            logger.info("console_display_initialized", compact=ui_compact)
+
         # Initialize components
-        console.print("[cyan]Initializing components...[/cyan]")
+        status_print("[cyan]Initializing components...[/cyan]")
 
         # Audio
         capture = AudioCapture(config.audio)
@@ -285,43 +332,79 @@ def run(ctx: click.Context, parallel: bool) -> None:
         feedback = AudioFeedback(playback, config.wake)
 
         # Speech
-        console.print(f"  Loading STT model ({config.stt.model})...")
+        status_print(f"  Loading STT model ({config.stt.model})...")
         stt = WhisperSTT(config.stt)
         try:
             await stt.load_model()
-            console.print("  [green]STT model loaded[/green]")
+            status_print("  [green]STT model loaded[/green]")
         except Exception as e:
-            console.print(f"  [red]Failed to load STT model: {e}[/red]")
+            console.print(f"  [red]Failed to load STT model: {e}[/red]")  # Always show errors
             console.print("  [yellow]Run: haro download-model tiny.en[/yellow]")
             return
 
         # TTS
-        console.print(f"  Loading TTS voice ({config.tts.voice})...")
+        status_print(f"  Loading TTS voice ({config.tts.voice})...")
         tts = PiperTTS(config.tts)
         try:
             await tts.load_voice()
-            console.print("  [green]TTS voice loaded[/green]")
+            status_print("  [green]TTS voice loaded[/green]")
             # Wire up TTS to feedback for verbal confirmations
             await feedback.set_tts(tts)
-            console.print("  [green]TTS connected to feedback system[/green]")
+            status_print("  [green]TTS connected to feedback system[/green]")
         except Exception as e:
-            console.print(f"  [yellow]TTS not available: {e}[/yellow]")
+            status_print(f"  [yellow]TTS not available: {e}[/yellow]")
             tts = None
 
         # Wake word detector
         wake_detector = WakeWordDetector(config.wake, config.audio)
 
         # Intelligence components
-        console.print("  Initializing Claude API client...")
+        # Initialize local LLM (Ollama) for fast first responses
+        ollama_client = None
+        if config.ollama.enabled:
+            status_print(f"  Initializing Ollama ({config.ollama.model})...")
+            from haro.intelligence.ollama_client import OllamaClient
+            ollama_client = OllamaClient(config.ollama)
+            try:
+                await ollama_client.initialize()
+                if ollama_client.is_available:
+                    status_print("  [green]Ollama (local LLM) ready[/green]")
+                else:
+                    status_print("  [yellow]Ollama not available (server not running?)[/yellow]")
+                    ollama_client = None
+            except Exception as e:
+                status_print(f"  [yellow]Ollama not available: {e}[/yellow]")
+                ollama_client = None
+
+        # Initialize cloud LLM client (OpenRouter preferred, Anthropic fallback)
+        # Check which API key is available
+        import os
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+
+        if openrouter_key:
+            status_print("  Initializing OpenRouter API client...")
+        elif anthropic_key:
+            status_print("  Initializing Anthropic API client...")
+        else:
+            status_print("  [yellow]No cloud API key found (OPENROUTER_API_KEY or ANTHROPIC_API_KEY)[/yellow]")
+
         api_client = ClaudeClient(config.api)
         prompt_builder = PromptBuilder(config.context, config.wake)
         response_parser = ResponseParser()
         try:
             await api_client.initialize()
-            console.print("  [green]Claude API client ready[/green]")
+            # Show which API was initialized
+            if api_client._use_openrouter:
+                status_print("  [green]OpenRouter API client ready[/green]")
+            else:
+                status_print("  [green]Anthropic API client ready[/green]")
         except Exception as e:
-            console.print(f"  [yellow]API not available: {e}[/yellow]")
-            console.print("  [yellow]HARO will echo responses without API[/yellow]")
+            status_print(f"  [yellow]Cloud API not available: {e}[/yellow]")
+            if not ollama_client:
+                status_print("  [red]No LLM available! HARO will echo responses without intelligence.[/red]")
+            else:
+                status_print("  [yellow]Using local Ollama only (no cloud fallback)[/yellow]")
             api_client = None
 
         # Context manager
@@ -329,10 +412,10 @@ def run(ctx: click.Context, parallel: bool) -> None:
         context_manager = ContextManager(config.context, config.api)
         context_manager.ensure_structure()
         context_manager.start_session(device_id=config.device_id)
-        console.print("  [green]Context manager ready[/green]")
+        status_print("  [green]Context manager ready[/green]")
 
-        # Create agent
-        agent = AgentClass(config)
+        # Create agent with shared event bus
+        agent = AgentClass(config, event_bus=event_bus)
         await agent.initialize(
             audio_capture=capture,
             audio_playback=playback,
@@ -342,19 +425,24 @@ def run(ctx: click.Context, parallel: bool) -> None:
             tts=tts,
             feedback=feedback,
             api_client=api_client,
+            ollama_client=ollama_client,  # Local LLM for fast first responses
             prompt_builder=prompt_builder,
             response_parser=response_parser,
             context_manager=context_manager,
         )
 
-        console.print("\n[bold green]HARO is ready![/bold green]")
-        console.print(f"Say \"[cyan]{config.wake.phrase}[/cyan]\" to activate.\n")
+        status_print("\n[bold green]HARO is ready![/bold green]")
+        status_print(f"Say \"[cyan]{config.wake.phrase}[/cyan]\" to activate.\n")
 
         # Start playback before playing ready sound
         await playback.start()
 
         # Play ready sound
         await feedback.play_ready()
+
+        # Start console display if enabled
+        if console_display:
+            await console_display.start()
 
         # Run agent
         logger.info("about_to_start_agent_run")
@@ -364,6 +452,9 @@ def run(ctx: click.Context, parallel: bool) -> None:
             logger.error("agent_run_exception", error=str(e), exc_info=True)
             raise
         finally:
+            # Stop console display
+            if console_display:
+                await console_display.stop()
             # End session and save
             context_manager.end_session()
             logger.info("haro_stopped")
