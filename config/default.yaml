@@ -10,11 +10,8 @@ haro:
     phrase: "haro"
     sensitivity: 0.5          # 0.0-1.0, lower = more sensitive
     confirmation_sound: true  # Play chime on activation
-    confirmation_phrases:     # Random selection for variety
-      - "Yes?"
-      - "I'm here."
-      - "Listening."
-      - "How can I help?"
+    confirmation_phrases:     # Immediate response on wake word detection
+      - "Hello, HARO?"
   
   # Audio settings
   audio:
@@ -30,12 +27,12 @@ haro:
     threshold: 0.5            # Energy threshold multiplier
     min_speech_duration: 0.5  # Minimum speech length (seconds)
     max_speech_duration: 30   # Maximum recording length (seconds)
-    silence_duration: 1.5     # Silence duration to end recording (seconds)
+    silence_duration: 3.0     # Stop recording after 3s of silence (for variable length prompts)
     noise_floor_adaptation: 0.05  # How quickly noise floor adapts
     
   # Speech-to-text (Whisper)
   stt:
-    model: "tiny.en"          # tiny.en (~75MB), base.en (~140MB), small.en (~480MB)
+    model: "base.en"          # base.en (~140MB, better accuracy), tiny.en (~75MB), small.en (~480MB)
     model_path: "~/.cache/haro/models/"
     language: "en"
     compute_type: "int8"      # int8 for CPU efficiency, float16 for GPU
@@ -50,25 +47,47 @@ haro:
     speed: 1.0                # Speech rate multiplier
     volume: 0.8               # Output volume (0.0-1.0)
 
-  # Feedback settings (canned responses and signoffs)
+  # Feedback settings (canned responses and signoffs - 3rd person)
   feedback:
     transcription_phrases:    # Brief but clear confirmation after speech transcription
-      - "Copy that"
-      - "Roger that"
-      - "Acknowledged"
-      - "Message received"
+      - "HARO copies that"
+      - "HARO received that"
+      - "HARO acknowledges"
+      - "HARO is processing"
     thinking_delay_threshold: 2.5  # Seconds before playing "thinking" phrase
     
-  # API settings
+  # API settings (cloud LLM via OpenRouter/Anthropic)
+  # The ":online" suffix enables OpenRouter web search for up-to-date information
   api:
-    provider: "anthropic"
-    model: "anthropic/claude-sonnet-4"
+    provider: "google"
+    model: "google/gemini-3-flash-preview:online"  # :online enables web search via OpenRouter
     max_tokens: 1024          # Maximum response tokens
     temperature: 0.7          # Response creativity (0.0-1.0)
     timeout: 30               # API timeout in seconds
     retry_attempts: 3         # Number of retries on failure
     retry_delay: 1.0          # Seconds between retries
-    
+
+  # Local LLM settings (Ollama)
+  ollama:
+    enabled: true             # Enable local LLM for simple queries
+    model: "ministral:3b"     # Local model (configurable, run 'ollama list' to see available)
+    base_url: "http://localhost:11434"
+    timeout: 30               # Timeout for local LLM requests
+    temperature: 0.7
+    max_tokens: 512           # Keep responses concise
+    cloud_keywords:           # Phrases that trigger cloud LLM (with web search via :online)
+      - "ask claude"
+      - "use claude"
+      - "search the web"
+      - "search online"
+      - "look up online"
+      - "current news"
+      - "latest news"
+      - "what's happening"
+      - "complex"
+      - "detailed"
+      - "explain in depth"
+
   # Context settings
   context:
     path: ".context/"         # Relative to working directory
