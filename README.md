@@ -60,8 +60,10 @@ The `:online` suffix enables web search for up-to-date information.
 
 ```bash
 haro download-model whisper tiny
-haro download-model piper en_US-lessac-medium
+haro download-model en_GB-southern_english_female-low
 ```
+
+The default voice is `en_GB-southern_english_female-low` (British female, 18MB). Alternative voices are available - run `haro models` to see all options.
 
 ### 4. Run HARO
 

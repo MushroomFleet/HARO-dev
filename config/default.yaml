@@ -42,7 +42,7 @@ haro:
   # Text-to-speech
   tts:
     engine: "piper"           # piper (default), supertonic (when available)
-    voice: "en_US-lessac-medium"  # Piper voice model
+    voice: "en_GB-southern_english_female-low"  # Piper voice model (British female)
     model_path: "~/.cache/haro/models/"
     speed: 1.0                # Speech rate multiplier
     volume: 0.8               # Output volume (0.0-1.0)
