@@ -55,7 +55,7 @@ class TTSConfig:
     """Text-to-Speech configuration."""
 
     engine: str = "piper"
-    voice: str = "en_US-lessac-medium"
+    voice: str = "en_GB-southern_english_female-low"
     model_path: str = "~/.cache/haro/models/"
     speed: float = 1.0
     volume: float = 0.8
