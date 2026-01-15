@@ -33,6 +33,35 @@ from haro.utils.text_chunker import SentenceChunker
 logger = get_logger(__name__)
 
 
+def _extract_domain(url: str) -> str:
+    """Extract domain.tld from a URL for TTS-friendly output.
+
+    Examples:
+        https://www.bbc.com/weather/2643743 -> bbc.com
+        https://www.accuweather.com/en/gb/london -> accuweather.com
+        https://docs.python.org/3/library -> python.org
+
+    Args:
+        url: Full URL string.
+
+    Returns:
+        Domain name with TLD (e.g., "bbc.com").
+    """
+    try:
+        # Remove protocol
+        domain = url.split("://")[-1]
+        # Get hostname (before first /)
+        domain = domain.split("/")[0]
+        # Remove www. prefix
+        if domain.startswith("www."):
+            domain = domain[4:]
+        # Remove port if present
+        domain = domain.split(":")[0]
+        return domain
+    except Exception:
+        return url
+
+
 def clean_text_for_tts(text: str) -> str:
     """Clean text for TTS output by removing markdown formatting.
 
@@ -43,12 +72,32 @@ def clean_text_for_tts(text: str) -> str:
     - ` (code markers)
     - > (blockquotes)
 
+    Also shortens URLs to just domain.tld for natural speech:
+    - [bbc.com](https://www.bbc.com/weather/123) -> "bbc.com"
+    - https://www.example.com/path -> "example.com"
+
     Args:
         text: Raw text that may contain markdown.
 
     Returns:
         Cleaned text suitable for TTS.
     """
+    # Shorten markdown links [text](url) to just the domain
+    # Pattern: [any text](url) -> domain.tld
+    def replace_markdown_link(match):
+        url = match.group(2)
+        return _extract_domain(url)
+
+    text = re.sub(r'\[([^\]]*)\]\(([^)]+)\)', replace_markdown_link, text)
+
+    # Shorten bare URLs to just the domain
+    # Pattern: http(s)://... -> domain.tld
+    def replace_bare_url(match):
+        url = match.group(0)
+        return _extract_domain(url)
+
+    text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', replace_bare_url, text)
+
     # Remove markdown headers (# at start of lines)
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
 
