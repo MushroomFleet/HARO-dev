@@ -28,6 +28,7 @@ from haro.intelligence.router import IntelligenceRouter
 from haro.intelligence.prompts import PromptBuilder
 from haro.context.manager import ContextManager
 from haro.utils.logging import get_logger
+from haro.utils.text_chunker import SentenceChunker
 
 logger = get_logger(__name__)
 
@@ -188,6 +189,13 @@ class Orchestrator:
         self._thinking_delay = 2.5  # Seconds before playing thinking phrase
         self._api_timeout = config.api.timeout if config.api else 30.0
 
+        # Streaming configuration
+        self._use_streaming = True  # Enable streaming by default for faster TTS
+        self._sentence_chunker = SentenceChunker(
+            min_chunk_length=15,  # Min chars before yielding
+            max_buffer_length=300,  # Force yield if too long
+        )
+
         self.stats = OrchestratorStats()
         self.logger = logger.bind(component="Orchestrator")
 
@@ -291,15 +299,31 @@ class Orchestrator:
         self.logger.info("orchestrator_loop_exited")
 
     async def _on_wake(self) -> None:
-        """Handle wake word detection."""
+        """Handle wake word detection.
+
+        Flow to prevent HARO from recording his own voice:
+        1. Pause listening immediately
+        2. Speak wake confirmation
+        3. Wait for confirmation to finish
+        4. Resume in active mode to record user speech
+        """
         # Publish wake event for UI
         await self._publish_wake()
         await self._publish_state("ACTIVE")
 
-        # Immediately speak wake confirmation
+        # Pause listening to prevent recording HARO's own voice
+        self._listen.pause_full()
+
+        # Speak wake confirmation
         phrase = random.choice(STATUS_PHRASES["wake"])
         await self._speech.speak_status(phrase)
-        self.logger.debug("wake_acknowledged")
+
+        # Wait for wake confirmation to finish playing
+        await self._speech.wait_for_speech(timeout=5.0)
+
+        # Now resume in active mode - ready to record user speech
+        self._listen.resume_active()
+        self.logger.debug("wake_acknowledged_ready_for_speech")
 
     async def _on_interrupt(self) -> None:
         """Handle interrupt command detected during TTS playback."""
@@ -416,6 +440,9 @@ class Orchestrator:
         and cloud (Claude) LLM based on query complexity.
         Local LLM is always tried first unless user explicitly asks for Claude.
 
+        When streaming is enabled and using direct API (not router),
+        sentences are sent to TTS as they arrive for faster response.
+
         Args:
             transcript: User transcript to send to LLM.
             ultratalk: If True, skip summarization for verbose output.
@@ -430,14 +457,148 @@ class Orchestrator:
         # Publish API start event for UI
         await self._publish_api_start()
 
-        # Start LLM call (routed or direct) - acknowledgment already done in _handle_transcript
+        # Use streaming for direct API calls (not routed) when enabled
         use_router = self._router is not None
+        use_streaming = self._use_streaming and not use_router and self._api is not None
+
+        if use_streaming:
+            # Streaming mode: sentences are spoken as they arrive
+            await self._handle_streaming_api_request(transcript, ultratalk=ultratalk)
+        else:
+            # Non-streaming mode: wait for full response
+            await self._handle_non_streaming_api_request(transcript, ultratalk=ultratalk, use_router=use_router)
+
+    async def _handle_streaming_api_request(self, transcript: str, ultratalk: bool = False) -> None:
+        """Handle LLM request with streaming for faster TTS.
+
+        Streams the response and sends sentences to TTS as they complete,
+        significantly reducing time-to-first-speech.
+
+        Args:
+            transcript: User transcript to send to LLM.
+            ultratalk: If True, skip summarization for verbose output.
+        """
+        # Build system prompt
+        system_prompt = None
+        if self._prompt_builder:
+            prompt = self._prompt_builder.build(user_input=transcript)
+            system_prompt = prompt.content
+
+        if not ultratalk:
+            system_prompt = self._add_conciseness_instruction(system_prompt)
+        else:
+            system_prompt = self._add_verbose_instruction(system_prompt)
+
+        self.logger.info("llm_streaming_start", transcript=transcript[:50])
+
+        # Delayed thinking phrase if slow
+        thinking_task = asyncio.create_task(self._delayed_thinking())
+        first_chunk_received = False
+        full_response = ""
+        sentence_count = 0
+
+        try:
+            # Reset chunker for new stream
+            self._sentence_chunker.reset()
+
+            # Stream from API and chunk into sentences
+            async for chunk in self._api.complete_streaming(
+                user_input=transcript,
+                system_prompt=system_prompt,
+                include_history=True,
+            ):
+                # Cancel thinking phrase once we start receiving
+                if not first_chunk_received:
+                    first_chunk_received = True
+                    thinking_task.cancel()
+                    await self._publish_state("SPEAKING")
+
+                full_response += chunk
+
+                # Try to extract a complete sentence
+                sentence = self._sentence_chunker.add_chunk(chunk)
+                if sentence:
+                    # Clean and speak this sentence immediately
+                    clean_sentence = clean_text_for_tts(sentence.text)
+                    if clean_sentence.strip():
+                        sentence_count += 1
+                        # First sentence gets no signoff, subsequent get none too
+                        # Final signoff added after all sentences
+                        await self._speech.speak(
+                            clean_sentence,
+                            priority=SpeechPriority.RESPONSE,
+                            signoff=None,  # No signoff per-sentence
+                        )
+                        self.logger.debug(
+                            "streaming_sentence_queued",
+                            sentence_num=sentence_count,
+                            text=clean_sentence[:30],
+                        )
+
+            # Flush any remaining content
+            remaining = self._sentence_chunker.flush()
+            if remaining and remaining.text.strip():
+                clean_remaining = clean_text_for_tts(remaining.text)
+                if clean_remaining.strip():
+                    sentence_count += 1
+                    # Last chunk gets the double signoff
+                    await self._speech.speak(
+                        clean_remaining,
+                        priority=SpeechPriority.RESPONSE,
+                        signoff=f"{self._config.wake.phrase} {self._config.wake.phrase}",
+                    )
+            elif sentence_count > 0:
+                # Add signoff as separate utterance if we already queued sentences
+                await self._speech.speak(
+                    f"{self._config.wake.phrase} {self._config.wake.phrase}",
+                    priority=SpeechPriority.RESPONSE,
+                    signoff=None,
+                )
+
+            # Publish full response for UI
+            clean_full = clean_text_for_tts(full_response)
+            await self._publish_api_response(clean_full, source="cloud")
+
+            self.logger.info(
+                "llm_streaming_complete",
+                sentences=sentence_count,
+                total_length=len(full_response),
+            )
+
+        except asyncio.TimeoutError:
+            thinking_task.cancel()
+            await self._publish_api_error("Timeout")
+            phrase = random.choice(STATUS_PHRASES["timeout"])
+            await self._speech.speak_status(phrase, urgent=True)
+            self.logger.warning("llm_streaming_timeout")
+
+        except Exception as e:
+            thinking_task.cancel()
+            await self._publish_api_error(str(e))
+            phrase = random.choice(STATUS_PHRASES["error"])
+            await self._speech.speak_status(phrase, urgent=True)
+            self.logger.error("llm_streaming_error", error=str(e))
+
+    async def _handle_non_streaming_api_request(
+        self,
+        transcript: str,
+        ultratalk: bool = False,
+        use_router: bool = False,
+    ) -> None:
+        """Handle LLM request without streaming (original behavior).
+
+        Args:
+            transcript: User transcript to send to LLM.
+            ultratalk: If True, skip summarization for verbose output.
+            use_router: If True, use the intelligence router.
+        """
+        # Start LLM call (routed or direct)
         if use_router:
             llm_task = asyncio.create_task(self._call_routed(transcript, ultratalk=ultratalk))
         else:
             llm_task = asyncio.create_task(self._call_api(transcript, ultratalk=ultratalk))
 
-        # Delayed thinking phrase if LLM is slow (only show if taking > 3 seconds)
+        # Delayed thinking phrase if LLM is slow
         thinking_task = asyncio.create_task(self._delayed_thinking())
 
         try:

@@ -157,6 +157,21 @@ class ListenWorker:
         self._vad.reset()
         self.logger.debug("listen_active")
 
+    def resume_active(self) -> None:
+        """Resume listening directly into active mode (recording speech).
+
+        Unlike resume() which returns to passive mode, this resumes
+        directly into active mode for recording user speech.
+        Used after wake confirmation to prevent recording HARO's voice.
+        """
+        self._paused = False
+        self._interrupt_mode = False
+        self._passive = False
+        self._had_speech = False
+        self._vad.reset()
+        self._interrupt_buffer = []
+        self.logger.debug("listen_resumed_active")
+
     def set_passive(self) -> None:
         """Set to passive mode (listening for wake word)."""
         self._passive = True

@@ -66,8 +66,9 @@ class APIConfig:
     """Claude API configuration."""
 
     provider: str = "anthropic"
+    # Default model for OpenRouter - can be overridden via OPENROUTER_MODEL env var
     # The :online suffix enables OpenRouter web search for up-to-date information
-    model: str = "anthropic/claude-sonnet-4.5:online"
+    model: str = "google/gemini-3-flash-preview:online"
     max_tokens: int = 1024
     temperature: float = 0.7
     timeout: int = 30
