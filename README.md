@@ -15,16 +15,61 @@
 
 ## Overview
 
-**HARO** is a voice-activated AI assistant that combines local speech processing with cloud intelligence. Built specifically for **Steam Deck** deployment, HARO provides hands-free interaction through wake word detection, speech recognition, and natural language responses.
+**HARO** is a voice-activated AI assistant that combines local speech processing with cloud intelligence. Built specifically for **Steam Deck** deployment (1280x720p optimized), HARO provides hands-free interaction through wake word detection, speech recognition, and natural language responses.
 
 ### Key Features
 
 - **Always-On Listening** - Wake word detection ("HARO") for hands-free activation
 - **Local Speech Processing** - Whisper STT and Piper TTS running on CPU (<150MB each)
-- **Cloud Intelligence** - Claude API integration for reasoning and conversation
+- **Cloud Intelligence** - OpenRouter API integration with configurable models (default: Gemini Flash)
+- **Streaming Responses** - Sentences are spoken as they arrive for faster response times
+- **Rich Console UI** - Real-time status display optimized for 720p displays
 - **Persistent Context** - Session memory and knowledge management via `.context` methodology
-- **Immersive Feedback** - Context-aware acknowledgments and verbal cues during processing
 - **Low Resource Usage** - Optimized for <30% CPU passive, <500MB RAM total
+
+---
+
+## Quick Start
+
+### 1. Get an API Key
+
+Sign up at [OpenRouter](https://openrouter.ai/) to get an API key. OpenRouter provides access to multiple AI models including Gemini, Claude, and GPT.
+
+### 2. Configure Environment
+
+Create a `.env` file (or copy from `.env.example`):
+
+```bash
+# Required: Your OpenRouter API key
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+# Optional: Choose your model (default shown)
+OPENROUTER_MODEL=google/gemini-3-flash-preview:online
+```
+
+**Available Models:**
+| Model | Description |
+|-------|-------------|
+| `google/gemini-3-flash-preview:online` | Fast, web-enabled (default) |
+| `anthropic/claude-sonnet-4` | High quality reasoning |
+| `openai/gpt-4o` | OpenAI's latest |
+
+The `:online` suffix enables web search for up-to-date information.
+
+### 3. Download Speech Models (First Time)
+
+```bash
+haro download-model whisper tiny
+haro download-model piper en_US-lessac-medium
+```
+
+### 4. Run HARO
+
+```bash
+haro
+```
+
+That's it! HARO will launch with the UI enabled by default.
 
 ---
 
@@ -34,17 +79,19 @@
   <img src="https://img.shields.io/badge/SteamOS-3.x-1a9fff?style=flat-square" alt="SteamOS 3.x">
   <img src="https://img.shields.io/badge/CPU-AMD%20Zen%202-ED1C24?style=flat-square" alt="AMD Zen 2">
   <img src="https://img.shields.io/badge/RAM-16GB-purple?style=flat-square" alt="16GB RAM">
+  <img src="https://img.shields.io/badge/Display-1280x720-orange?style=flat-square" alt="1280x720">
 </p>
 
 HARO is designed from the ground up for the **Steam Deck** handheld gaming PC:
 
 | Requirement | Specification |
 |-------------|---------------|
-| **OS** | SteamOS 3.x (Arch Linux) |
+| **OS** | SteamOS 3.x (Arch Linux) or Windows |
 | **CPU** | AMD Zen 2 (CPU-only inference) |
 | **RAM** | 16GB |
 | **Storage** | ~500MB for models |
-| **Network** | Required for Claude API |
+| **Display** | 1280x720 (UI optimized) |
+| **Network** | Required for API calls |
 
 ### Why Steam Deck?
 
@@ -64,23 +111,10 @@ A Windows portable executable is available for testing and development:
 #### Quick Start (Windows)
 
 1. Download and extract `HARO-Windows.zip` from [Releases](https://github.com/MushroomFleet/HARO-dev/releases)
-2. Copy `.env.example` to `.env` and add your API key:
-   ```
-   OPENROUTER_API_KEY=sk-or-v1-your-key-here
-   ```
-3. Check system status:
-   ```cmd
-   haro.exe status
-   ```
-4. Download speech models (first time only):
-   ```cmd
-   haro.exe download-model whisper tiny
-   haro.exe download-model piper en_US-lessac-medium
-   ```
-5. Run HARO:
-   ```cmd
-   haro.exe run
-   ```
+2. Copy `.env.example` to `.env` and add your API key
+3. Check system status: `haro.exe status`
+4. Download models: `haro.exe download-model whisper tiny`
+5. Run HARO: `haro.exe`
 
 ---
 
@@ -97,7 +131,7 @@ A Windows portable executable is available for testing and development:
 │       ↑                                      │              │
 │       └──────────────────────────────────────┘              │
 ├─────────────────────────────────────────────────────────────┤
-│  Audio I/O    │  Wake Word   │  STT/TTS     │  Claude API  │
+│  Audio I/O    │  Wake Word   │  STT/TTS     │  LLM API     │
 │  (sounddevice)│  (Whisper)   │  (Whisper/   │  (OpenRouter)│
 │               │              │   Piper)     │              │
 └─────────────────────────────────────────────────────────────┘
@@ -106,30 +140,41 @@ A Windows portable executable is available for testing and development:
 ### Conversation Flow
 
 ```
-User: "HARO, what's the weather like?"
+User: "HARO"
        ↓
-HARO: "Let me check the weather" (immediate acknowledgment)
+HARO: "Hello, HARO?" (wake confirmation, then starts listening)
        ↓
-HARO: "Getting the info now" (while waiting for API)
+User: "What's the weather like?"
        ↓
-HARO: "It looks sunny with a high of 72 degrees, HARO." (response with sign-off)
+HARO: "HARO heard: What's the weather..." (acknowledgment)
+       ↓
+HARO: "It looks sunny with a high of 72 degrees. HARO HARO." (streamed response)
 ```
+
+### Streaming Response
+
+HARO uses streaming to reduce time-to-first-speech:
+- LLM responses are streamed sentence-by-sentence
+- Each sentence is sent to TTS as soon as it's complete
+- Typical first-word latency: **0.7-1.5 seconds** (vs 3-7s without streaming)
 
 ---
 
-## Available Commands
+## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `haro run` | Start the voice assistant |
+| `haro` | Start the voice assistant (with UI) |
+| `haro --no-ui` | Run without the rich console UI |
 | `haro status` | Check system and dependency status |
 | `haro test-audio` | Test audio input/output |
 | `haro test-stt` | Test speech-to-text |
 | `haro test-tts` | Test text-to-speech |
 | `haro test-wake` | Test wake word detection |
 | `haro models` | List installed speech models |
-| `haro download-model` | Download a speech model |
+| `haro download-model <type> <name>` | Download a speech model |
 | `haro init-context` | Initialize .context directory |
+| `haro --help` | Show all available commands |
 
 ---
 
@@ -146,13 +191,39 @@ Once running, HARO responds to these built-in commands:
 | "HARO, what's the date" | Get current date |
 | "HARO, status" | System status |
 | "HARO, help" | List available commands |
+| "HARO, new conversation" | Clear conversation history |
 | "HARO, goodbye" | Graceful shutdown |
+
+### Special Keywords
+
+| Keyword | Effect |
+|---------|--------|
+| "ULTRATALK" | Request verbose, detailed responses |
+| "ask Claude" / "search online" | Force cloud LLM with web search |
 
 ---
 
 ## Configuration
 
-HARO uses YAML configuration files:
+### Environment Variables (.env)
+
+```bash
+# Required: API Key
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+# Optional: Model selection (default: google/gemini-3-flash-preview:online)
+OPENROUTER_MODEL=google/gemini-3-flash-preview:online
+
+# Optional: Custom API endpoint
+# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
+# Alternative: Direct Anthropic API
+# ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+### YAML Configuration
+
+HARO also supports YAML configuration files:
 
 ```yaml
 # config/default.yaml (excerpt)
@@ -167,22 +238,16 @@ wake:
   confirmation_sound: true
 
 api:
-  provider: "openrouter"
-  model: "anthropic/claude-sonnet-4"
+  model: "google/gemini-3-flash-preview:online"
   timeout: 30
+  max_tokens: 1024
 ```
 
-### Environment Variables
-
-Create a `.env` file with your API key:
-
-```bash
-# OpenRouter (recommended)
-OPENROUTER_API_KEY=sk-or-v1-your-key-here
-
-# Or direct Anthropic API
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
+Configuration is loaded in order (later overrides earlier):
+1. `config/default.yaml` (bundled)
+2. `/etc/haro/config.yaml` (system)
+3. `~/.config/haro/config.yaml` (user)
+4. `./haro.yaml` (local)
 
 ---
 
@@ -227,6 +292,7 @@ Output: `dist/HARO/haro.exe`
 - [x] Phase 5: Claude API Integration
 - [x] Phase 6: .context Memory System
 - [x] Phase 7: Polish & Optimization
+- [x] Phase 7.5: Streaming LLM Responses
 - [ ] Phase 8: Steam Deck Deployment (systemd service, install script)
 
 ---
@@ -236,7 +302,8 @@ Output: `dist/HARO/haro.exe`
 | Metric | Target | Current |
 |--------|--------|---------|
 | Wake word latency | <200ms | ~150ms |
-| End-to-end response | <6s | ~4-5s |
+| Time to first word (streaming) | <2s | ~0.7-1.5s |
+| End-to-end response | <6s | ~3-5s |
 | CPU (passive) | <30% | ~15-20% |
 | CPU (active) | <80% | ~60-70% |
 | RAM usage | <500MB | ~400MB |
@@ -255,10 +322,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Piper TTS](https://github.com/rhasspy/piper) - Fast, local neural text-to-speech
 - [Anthropic Claude](https://www.anthropic.com/) - AI reasoning and conversation
 - [OpenRouter](https://openrouter.ai/) - Multi-model API gateway
+- [Google Gemini](https://deepmind.google/technologies/gemini/) - Default LLM provider
 
 ---
 
-## 📚 Citation
+## Citation
 
 ### Academic Citation
 
