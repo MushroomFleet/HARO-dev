@@ -53,6 +53,11 @@ PIPER_VOICES = {
         "files": ["en_US-ryan-medium.onnx", "en_US-ryan-medium.onnx.json"],
         "size_mb": 60,
     },
+    "en_GB-southern_english_female-low": {
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/southern_english_female/low/",
+        "files": ["en_GB-southern_english_female-low.onnx", "en_GB-southern_english_female-low.onnx.json"],
+        "size_mb": 18,
+    },
 }
 
 

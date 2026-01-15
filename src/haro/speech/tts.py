@@ -353,6 +353,7 @@ class PiperTTS:
             "en_US-ryan-high",
             "en_GB-alan-medium",
             "en_GB-southern_english_female-medium",
+            "en_GB-southern_english_female-low",
         ]
 
     @staticmethod
@@ -401,6 +402,12 @@ class PiperTTS:
                 "quality": "medium",
                 "size_mb": 60,
                 "gender": "male",
+            },
+            "en_GB-southern_english_female-low": {
+                "language": "en_GB",
+                "quality": "low",
+                "size_mb": 18,
+                "gender": "female",
             },
         }
         return voice_info.get(voice_name, {})
