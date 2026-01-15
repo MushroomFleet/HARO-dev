@@ -15,6 +15,10 @@ from haro.utils.devices import (
     DeviceManager,
     get_device_summary,
 )
+from haro.utils.text_chunker import (
+    SentenceChunker,
+    TextChunk,
+)
 
 __all__ = [
     "setup_logging",
@@ -29,4 +33,6 @@ __all__ = [
     "AudioDevice",
     "DeviceManager",
     "get_device_summary",
+    "SentenceChunker",
+    "TextChunk",
 ]

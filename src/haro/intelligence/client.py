@@ -11,7 +11,8 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, AsyncIterator
+import json
 
 import httpx
 from dotenv import load_dotenv
@@ -190,6 +191,10 @@ class ClaudeClient:
                 self._base_url = base_url or os.environ.get(
                     "OPENROUTER_BASE_URL", OPENROUTER_BASE_URL
                 )
+                # Override model from environment if set
+                env_model = os.environ.get("OPENROUTER_MODEL")
+                if env_model:
+                    self.model = env_model
                 # No client needed for httpx-based requests
                 self._client = None
                 self.logger.info(
@@ -505,6 +510,166 @@ class ClaudeClient:
             },
             stop_reason=choice.get("finish_reason", ""),
         )
+
+    async def complete_streaming(
+        self,
+        user_input: str,
+        system_prompt: Optional[str] = None,
+        include_history: bool = True,
+    ) -> AsyncIterator[str]:
+        """Send a streaming completion request to Claude/OpenRouter.
+
+        Yields text chunks as they arrive from the API, enabling
+        faster time-to-first-speech for TTS.
+
+        Args:
+            user_input: The user's message.
+            system_prompt: Optional system prompt to use.
+            include_history: Whether to include message history.
+
+        Yields:
+            Text chunks as they arrive.
+
+        Raises:
+            APIError: If the request fails.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        # Build messages
+        messages = []
+        if include_history:
+            messages = self._get_history_messages()
+
+        messages.append({"role": "user", "content": user_input})
+
+        self.logger.info(
+            "llm_streaming_prompt_sent",
+            user_input=user_input[:50],
+            history_messages=len(messages) - 1,
+            model=self.model,
+        )
+
+        start_time = time.time()
+        full_response = ""
+
+        try:
+            if self._use_openrouter:
+                async for chunk in self._stream_openrouter_request(
+                    system=system_prompt or "",
+                    messages=messages,
+                ):
+                    full_response += chunk
+                    yield chunk
+            else:
+                # For Anthropic, fall back to non-streaming for now
+                # (could add Anthropic streaming later)
+                response = await self._make_anthropic_request(
+                    system=system_prompt or "",
+                    messages=messages,
+                )
+                full_response = response.text
+                yield response.text
+
+            latency = time.time() - start_time
+
+            # Add to history after complete
+            self._add_message("user", user_input)
+            self._add_message("assistant", full_response)
+
+            # Update stats
+            self._total_requests += 1
+
+            self.logger.info(
+                "streaming_completion_success",
+                model=self.model,
+                latency=f"{latency:.2f}s",
+                response_length=len(full_response),
+            )
+
+        except Exception as e:
+            self._errors += 1
+            self.logger.error("streaming_completion_failed", error=str(e))
+            raise
+
+    async def _stream_openrouter_request(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+    ) -> AsyncIterator[str]:
+        """Stream response from OpenRouter API.
+
+        Args:
+            system: System prompt.
+            messages: List of messages.
+
+        Yields:
+            Text chunks as they arrive.
+        """
+        # Build OpenAI-compatible request
+        openai_messages = []
+
+        if system:
+            openai_messages.append({"role": "system", "content": system})
+
+        openai_messages.extend(messages)
+
+        payload = {
+            "model": self.model,
+            "messages": openai_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,  # Enable streaming
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/user/haro",
+            "X-Title": "HARO Voice Assistant",
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    error_text = error_text.decode()
+                    if response.status_code == 429:
+                        raise APIError(f"Rate limited: {error_text}", status_code=429, retryable=True)
+                    elif response.status_code == 401:
+                        raise APIError(f"Authentication failed: {error_text}", status_code=401, retryable=False)
+                    else:
+                        raise APIError(f"API error ({response.status_code}): {error_text}", retryable=False)
+
+                # Process SSE stream
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    # SSE format: "data: {json}"
+                    if line.startswith("data: "):
+                        data_str = line[6:]  # Remove "data: " prefix
+
+                        # Check for stream end
+                        if data_str.strip() == "[DONE]":
+                            break
+
+                        try:
+                            data = json.loads(data_str)
+                            choices = data.get("choices", [])
+                            if choices:
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    yield content
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON
+                            continue
 
     def _add_message(self, role: str, content: str) -> None:
         """Add a message to history.

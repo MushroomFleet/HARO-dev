@@ -38,11 +38,15 @@ logger = get_logger(__name__)
 
 @dataclass
 class DisplayConfig:
-    """Configuration for the console display."""
+    """Configuration for the console display.
+
+    Optimized for 1280x720p displays (Steam Deck, small screens).
+    At 720p, terminal typically has ~80-100 columns.
+    """
 
     refresh_rate: float = 4.0  # Updates per second
-    max_conversation_turns: int = 5  # Number of turns to show
-    max_events: int = 8  # Number of recent events to show
+    max_conversation_turns: int = 4  # Number of turns to show (reduced for 720p)
+    max_events: int = 6  # Number of recent events to show (reduced for 720p)
     show_audio_levels: bool = True
     show_stats: bool = True
     show_events: bool = True
@@ -446,26 +450,33 @@ class ConsoleDisplay:
 ╩ ╩╩ ╩╩╚═╚═╝"""
 
     def _build_full_layout(self) -> Panel:
-        """Build the full multi-panel layout."""
+        """Build the full multi-panel layout.
+
+        Optimized for 1280x720p displays (Steam Deck).
+        - Reduced conversation turns and events for 720p
+        - ASCII art panels use original sizes to prevent character breakage
+        - Compact footer
+        """
         # Create main layout grid
         layout = Layout()
         layout.split_column(
-            Layout(name="header", size=7),  # Increased for HARO character
+            Layout(name="header", size=7),  # Original size for 5-line HARO character
             Layout(name="main", ratio=1),
             Layout(name="footer", size=3),
         )
 
         # Split header: HARO character (left), status (middle), logo (right)
+        # ASCII art panels must use original sizes to prevent character breakage
         layout["header"].split_row(
-            Layout(name="haro_char", size=11),  # HARO character art
+            Layout(name="haro_char", size=11),  # Original: fits 7-char wide HARO art
             Layout(name="status", ratio=3),
-            Layout(name="logo", size=16),
+            Layout(name="logo", size=16),  # Original: fits 13-char wide logo
         )
 
-        # Split main into left and right
+        # Split main into left and right (more space for conversation on small screens)
         layout["main"].split_row(
-            Layout(name="left", ratio=2),
-            Layout(name="right", ratio=1),
+            Layout(name="left", ratio=3),  # More space for conversation
+            Layout(name="right", ratio=1),  # Narrower events/audio panel
         )
 
         # Populate sections
@@ -474,7 +485,7 @@ class ConsoleDisplay:
         layout["logo"].update(self._build_logo_panel())
         layout["left"].update(self._build_conversation_panel())
         layout["right"].split_column(
-            Layout(self._build_audio_panel(), name="audio", size=5),
+            Layout(self._build_audio_panel(), name="audio", size=4),  # Compact for 720p
             Layout(self._build_events_panel(), name="events"),
         )
         layout["footer"].update(self._build_stats_bar())
@@ -554,11 +565,9 @@ class ConsoleDisplay:
                         conv_text.append(" (cloud)", style="dim blue")
                     conv_text.append(": ", style="bold green")
 
-                # Content (truncate if too long)
-                content = turn.content
-                if len(content) > 200:
-                    content = content[:197] + "..."
-                conv_text.append(f"{content}\n\n")
+                # Show full content - no truncation in UI
+                # (logging truncation is handled separately in client.py)
+                conv_text.append(f"{turn.content}\n\n")
 
         return Panel(conv_text, title="Conversation", border_style="cyan")
 

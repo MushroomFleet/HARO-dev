@@ -249,9 +249,9 @@ def init_context_cmd(
     help="Use sequential mode instead of parallel workers (for debugging)",
 )
 @click.option(
-    "--ui",
-    is_flag=True,
-    help="Enable rich console UI with real-time status display",
+    "--ui/--no-ui",
+    default=True,
+    help="Enable rich console UI with real-time status display (default: enabled)",
 )
 @click.option(
     "--ui-compact",
@@ -262,8 +262,9 @@ def init_context_cmd(
 def run(ctx: click.Context, sequential: bool, ui: bool, ui_compact: bool) -> None:
     """Run the HARO voice assistant.
 
-    By default, runs in parallel mode for faster response times.
+    By default, runs in parallel mode with UI enabled for faster response times.
     Use --sequential for debugging with the single-threaded agent.
+    Use --no-ui to disable the rich console UI.
     """
     config: HaroConfig = ctx.obj["config"]
 
@@ -926,7 +927,66 @@ def test_tts(ctx: click.Context, text: str) -> None:
 
 
 def main() -> None:
-    """Main entry point."""
+    """Main entry point.
+
+    If no subcommand is provided, defaults to 'run' command.
+    This allows users to simply type 'haro' to start the assistant.
+    """
+    import sys
+
+    # Check if a subcommand was provided
+    # Skip if any known subcommand or help/version flags are present
+    known_commands = {'status', 'init-context', 'run', 'test-audio', 'models',
+                      'download-model', 'test-stt', 'test-wake', 'test-tts'}
+    help_flags = {'--help', '-h', '--version'}
+
+    # Get args after the script name
+    args = sys.argv[1:]
+
+    # Check if we should default to 'run'
+    # Default to 'run' if:
+    # 1. No arguments at all, OR
+    # 2. Only global options (--config, --debug) are present without a subcommand
+    should_default_to_run = True
+
+    for arg in args:
+        # If it's a help/version flag, don't default
+        if arg in help_flags:
+            should_default_to_run = False
+            break
+        # If it's a known subcommand, don't default
+        if arg in known_commands:
+            should_default_to_run = False
+            break
+        # If it looks like a positional arg (not starting with -), it might be a subcommand
+        if not arg.startswith('-') and arg not in {'-c'}:
+            # Check if this is a value for --config
+            try:
+                prev_idx = args.index(arg) - 1
+                if prev_idx >= 0 and args[prev_idx] in {'--config', '-c'}:
+                    continue  # This is a config file path, not a subcommand
+            except (ValueError, IndexError):
+                pass
+            # Unknown positional - could be typo, let Click handle it
+            should_default_to_run = False
+            break
+
+    if should_default_to_run:
+        # Insert 'run' as the first non-option argument
+        # Find where to insert (after global options)
+        insert_pos = 0
+        i = 0
+        while i < len(args):
+            if args[i] in {'--config', '-c'}:
+                i += 2  # Skip option and its value
+                insert_pos = i
+            elif args[i] == '--debug':
+                i += 1
+                insert_pos = i
+            else:
+                break
+        sys.argv.insert(1 + insert_pos, 'run')
+
     cli(obj={})
 
 
