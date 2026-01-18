@@ -17,6 +17,8 @@
 
 **HARO** is a voice-activated AI assistant that combines local speech processing with cloud intelligence. Built specifically for **Steam Deck** deployment (1280x720p optimized), HARO provides hands-free interaction through wake word detection, speech recognition, and natural language responses.
 
+!(Steam Deck)[https://raw.githubusercontent.com/MushroomFleet/HARO-dev/refs/heads/main/images/HARO-deck.jpg]
+
 ### Key Features
 
 - **Always-On Listening** - Wake word detection ("HARO") for hands-free activation
